@@ -1,0 +1,2211 @@
+---
+title: "Trust in the Military and Democratic Constraint on the Use of Force"
+date: "29 April, 2019"
+author: "Adam Schless-Meier"
+always_allow_html: yes
+output:
+  html_document:
+    df_print: paged 
+  pdf_document:   #pdf does not knit properly because of PanDoc issues
+  word_document:  #tables don't knit properly to Word and are saved as separate html files
+    reference_docx: doc_template.docx
+    toc: yes
+header-includes:
+   - \usepackage{setspace}
+   - \doublespacing
+bibliography: bibliography.bib
+csl: chicago.csl
+---
+
+<!-- Provides a style formatting for the tables at end -->
+<style>
+table, td, th {
+  border: none;
+  padding-left: 1em;
+  padding-right: 1em;
+  min-width: 50%;
+  margin-left: auto;
+  margin-right: auto;
+  margin-top: 1em;
+  margin-bottom: 1em;
+}
+</style>
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 5, fig.height = 5)
+
+library(dplyr)     # tidy data
+library(plm)       # fixed effects
+library(tidyverse) # the rest of the tidyverse
+library(knitr)     # formatting for html tables
+library(caret)     # Splitting Random Forests data
+library(stargazer) # Get those pretty tables, yeah!
+library(interplot) # Generate the interaction plots
+library(corrgram)  # Generate the correlation matrix
+library(kableExtra)# Modifiers for the kables to pretty them up
+library(scales)    # Generates color scales for plots
+
+doc.type <- knitr::opts_knit$get('rmarkdown.pandoc.to') # Get document type for
+                             # differentiating html and docx formatting options
+
+if (doc.type == "docx" ) {
+  library(flextable) # Provides the tables for Microsoft Office  
+}
+```
+
+```{r data_read, include = FALSE}
+### Read in the datasets used in this paper
+polity <- readr::read_rds("Data/polity_cleaned.rds")
+MIDs <- readr::read_rds("Data/mids_cleaned.rds")
+eurobarometer <- readr::read_rds("Data/Eurobarometer_Data/All_Eurobarometers.rds")
+draft <- read.csv("Data/Military_Draft/MilitaryRecruitmentData.csv")
+draft <- dplyr::select(draft, ccode, year, recruit)
+enpp <- readxl::read_xlsx("Data/ENPP/ENPP.xlsx")
+```
+
+```{r mid_data_input, include = FALSE}
+## This section slices the MID dataset into the three dependent variables that
+## I measure against in the models below, plus one I don't use because of zero
+## instances that occur with my country-years. 
+
+MIDs_wvs <- dplyr::filter(MIDs, styear >= 1945) %>%
+  mutate(year_lag = styear - 1) %>%
+  mutate(orig_threat = case_when(
+    hiact == 0 | orig == 0 | sidea == 0 ~ 0,
+    TRUE ~ 1
+  )) %>% 
+  mutate(orig_display = case_when(
+    hiact < 7 | orig == 0 | sidea == 0 ~ 0,
+    TRUE ~ 1
+  )) %>% 
+  mutate(orig_use = case_when(
+    hiact < 13 | orig == 0 | sidea == 0 ~ 0,
+    TRUE ~ 1
+  )) %>% 
+  mutate(orig_war = case_when(
+    hiact < 20 | orig == 0 | sidea == 0 ~ 0,
+    TRUE ~ 1
+  ))
+
+MIDs_wvs <- dplyr::select(MIDs_wvs, stabb:orig, year_lag:orig_war)
+MIDs_wvs$ccode <- as.numeric(MIDs_wvs$ccode)
+
+## Create MIDs from Cold War period for former Czeccoslovakia, Yugosloavia and
+## the Baltic states.
+## I realize this should be a function, will consider changing given time
+
+# Former Czechoslovakia
+czech_MIDs <- dplyr::filter(MIDs_wvs, ccode == 315)
+  czech_MIDs$ccode <- 316
+  czech_MIDs$stabb <- "CZR"
+  MIDs_wvs <- bind_rows(MIDs_wvs, czech_MIDs)
+slovak_MIDs <- dplyr::filter(MIDs_wvs, ccode == 315)
+  slovak_MIDs$ccode <- 317
+  slovak_MIDs$stabb <- "SLO"
+  MIDs_wvs <- bind_rows(MIDs_wvs, slovak_MIDs)
+  
+# Former Yugoslavia
+slovenia_MIDs <- dplyr::filter(MIDs_wvs, ccode == 345, styear <= 1992)
+  slovenia_MIDs$ccode <- 349
+  slovenia_MIDs$stabb <- "SLV"
+  MIDs_wvs <- bind_rows(MIDs_wvs, slovenia_MIDs)
+croatia_MIDs <- dplyr::filter(MIDs_wvs, ccode == 345, styear <= 1991)
+  croatia_MIDs$ccode <- 344
+  croatia_MIDs$stabb <- "CRO"
+  MIDs_wvs <- bind_rows(MIDs_wvs, croatia_MIDs)
+macedonia_MIDs <- dplyr::filter(MIDs_wvs, ccode == 345, styear <= 1991)
+  macedonia_MIDs$ccode <- 343
+  macedonia_MIDs$stabb <- "MAC"
+  MIDs_wvs <- bind_rows(MIDs_wvs, macedonia_MIDs)
+  
+# Baltic states, formerly Russia
+latvia_MIDs <- dplyr::filter(MIDs_wvs, ccode == 365, styear <= 1991)
+  latvia_MIDs$ccode <- 367
+  latvia_MIDs$stabb <- "LAT"
+  MIDs_wvs <- bind_rows(MIDs_wvs, latvia_MIDs)
+lithuania_MIDs <- dplyr::filter(MIDs_wvs, ccode == 365, styear <= 1991)
+  lithuania_MIDs$ccode <- 368
+  lithuania_MIDs$stabb <- "LIT"
+  MIDs_wvs <- bind_rows(MIDs_wvs, lithuania_MIDs)
+estonia_MIDs <- dplyr::filter(MIDs_wvs, ccode == 365, styear <= 1991)
+  estonia_MIDs$ccode <- 366
+  estonia_MIDs$stabb <- "EST"
+  MIDs_wvs <- bind_rows(MIDs_wvs, estonia_MIDs)
+
+```
+
+```{r euro_data_input, include = FALSE}
+
+## This chunk is where I aggregate the individual Eurobarometer surveys into
+## aggregate country years.
+
+# Copy overall dataset for modifications
+eurobarometer_edit <- eurobarometer
+
+for (i in c(2:9, 13:20)) {
+  eurobarometer_edit[[i]] <- as.numeric(eurobarometer_edit[[i]])
+  }
+ 
+# Create all the country-year aggregate statistics
+eurobarometer_sums <- eurobarometer_edit %>% 
+  dplyr::filter(!is.na(Trust_Army), !is.na(Trust_Press),
+                !is.na(Left_Right), Year < 2010) %>%
+  group_by(Country, Year, Quarter) %>% 
+  summarise(n = n(),
+            conf_mil = mean(Trust_Army[Trust_Army != 0]),
+            mil_dk_prop = sum(Trust_Army == 0) / n,
+            conf_press = mean(Trust_Press[Trust_Press != 0]),
+            conf_parl = mean(Trust_Nat_Parl[Trust_Nat_Parl != 0], na.rm = TRUE),
+            conf_UN = mean(Trust_UN[Trust_UN != 0], na.rm = TRUE),
+            conf_gov = mean(Trust_Nat_Gov[Trust_Nat_Gov != 0], na.rm = TRUE),
+            conf_EU = mean(Trust_EU[Trust_EU != 0], na.rm = TRUE),
+            conf_relig = mean(Trust_Church[Trust_Church != 0], na.rm = TRUE),
+            conf_domestic = (conf_press + conf_gov) / 2,
+            conf_all = (conf_press + conf_parl + conf_UN +
+                          conf_gov + conf_EU + conf_relig) / 6)
+
+## For the claim in the text that the 0 to 1 scale doesn't fundamentally change
+## the results, uncomment the below code.
+#
+# eurobarometer_sums <- eurobarometer_sums %>% 
+#   group_by(Country, Year, Quarter) %>% 
+#   summarise(n = n(),
+#             conf_mil = (conf_mil + 1) / 2,
+#             mil_dk_prop = mil_dk_prop,
+#             conf_press = (conf_press + 1) / 2,
+#             conf_parl = (conf_parl + 1)/ 2,
+#             conf_UN = (conf_UN + 1) / 2,
+#             conf_gov = (conf_gov + 1) / 2,
+#             conf_EU = (conf_EU + 1) / 2,
+#             conf_relig = (conf_relig + 1) / 2,
+#             conf_domestic = (conf_press + conf_gov) / 2,
+#             conf_all = (conf_press + conf_parl + conf_UN +
+#                           conf_gov + conf_EU + conf_relig) / 6)
+
+# Rename countries to align with polity data. I don't really need the Polity
+# data since this sample only includes democracies, but it could help for
+# WVS data
+eurobarometer_sums$Country <- ifelse(eurobarometer_sums$Country == "Macedonia (Fyrom)",
+       "Macedonia", eurobarometer_sums$Country)
+eurobarometer_sums$Country <- ifelse(eurobarometer_sums$Country == "Slovakia",
+       "Slovak Republic", eurobarometer_sums$Country)
+
+# Standardize the east/west Germany samples for the 
+# actual population size in Germany
+germany_values <- dplyr::filter(eurobarometer_sums,
+                                Country == "East Germany" |
+                                Country == "West Germany")
+
+east_constant <- (2.5 + 1.6 + 4.1 + 2.2 + 2.2) / 82.2
+west_constant <- 1 - east_constant
+
+germany_east <- function(x) {
+  return(x * east_constant)
+}
+
+germany_west <- function(x) {
+  return(x * east_constant)
+}
+
+germany_east_2<- dplyr::filter(germany_values, Country == "East Germany") %>% 
+  mutate_at(vars(conf_mil:conf_all), germany_east)
+  
+germany_values <- dplyr::filter(germany_values, Country == "West Germany") %>% 
+  mutate_at(vars(conf_mil:conf_all), germany_west)
+
+germany_values <- bind_rows(germany_values, germany_east_2)
+germany_values$Country <- "Germany"
+
+germany_values <- dplyr::group_by(germany_values, Country, Year, Quarter) %>% 
+  summarize_at(vars(n:conf_all), sum)
+
+# Standardize the Northern Ireland/Great Britain samples for the 
+# actual population size in the United Kingdom
+uk_values <- dplyr::filter(eurobarometer_sums,
+                                Country == "Northern Ireland" |
+                                Country == "Great Britain")
+
+northern_ireland <- 1.9 / 66
+uk_ratio <- 1 - northern_ireland
+
+nor_ire <- function(x) {
+  return(x * northern_ireland)
+}
+
+great_brit <- function(x) {
+  return(x * uk_ratio)
+}
+
+north_ireland <- dplyr::filter(uk_values, Country == "Northern Ireland") %>% 
+  mutate_at(vars(conf_mil:conf_all), nor_ire)
+  
+uk_values <- dplyr::filter(uk_values, Country == "Great Britain") %>% 
+  mutate_at(vars(conf_mil:conf_all), great_brit)
+
+uk_values <- bind_rows(uk_values, north_ireland)
+uk_values$Country <- "United Kingdom"
+
+uk_values <- dplyr::group_by(uk_values, Country, Year, Quarter) %>% 
+  summarize_at(vars(n:conf_all), sum)
+
+# Join the rescaled data with the countries that did not need to be rescaled
+eurobarometer_sums <- dplyr::filter(eurobarometer_sums,
+                                    Country != "East Germany",
+                                    Country != "West Germany",
+                                    Country != "Northern Ireland",
+                                    Country != "Great Britain")
+eurobarometer_sums <- bind_rows(eurobarometer_sums,
+                                germany_values, uk_values)
+
+
+euro_years <- left_join(eurobarometer_sums, polity,
+                                by = c("Country" = "country",
+                                       "Year" = "year")) %>% 
+              dplyr::filter(!is.na(polity))
+
+# This is where I do a simple imputing for the missing 1998 data by averaging
+# the values for 1997 and 1999. This data was used for the fixed-effects models
+impute_1998 <- dplyr::filter(euro_years, Year == 1997 | Year == 1999) %>% 
+  group_by(Country) %>% 
+  summarize_all(mean)
+
+euro_impute <- dplyr::bind_rows(euro_years, impute_1998) %>%
+  arrange(Country, Year)
+```
+
+```{r mid_process_for_merge, include = FALSE, cache = TRUE}
+## This is a very confusing for loop that chops all the MID data into quarters, 
+## gets the time since the last MID, and also gets variables indicating if
+## there was an initiated MID in the subsequent 12 months. This creates the more
+## specific temporal range observed in the OLS and Logit models rather than just
+## using country-year t+1 instances
+
+## There is absolutely a more efficient way to do this, but this works for now
+
+# Get all unique country codes to loop through. Only need cc_euro with current
+# models
+cc_euro <- unique(euro_years$COW)
+
+# Create an empty data frame to gather the variables of interest for the MID
+# data
+all_MIDs <- data.frame(matrix(ncol = 14, nrow = 0))
+colnames(all_MIDs) <- c("COW", "Year", "Quarter", "Orig_Threat", "Orig_Display",
+                        "Orig_Use", "Orig_War", "Participaint",
+                        "Constraint", "Last_MID_Year", "Last_MID_Q", "New_MID",
+                        "Y_Since", "Q_Since")
+
+## The base starting variables to set outside the loop. The loop begins with the
+## end of World War 2 and presumes all European countries were part of that MID
+j <- 1         # Starting reference row number
+new_MID <- 1   # Sets 1945, Quarter 1 as having been in an MID for all countries 
+
+# Start by looping through all countries
+for (i in cc_euro) {
+  # Create a new df of MIDs for current country and set relevant variables to
+  # default values
+  country_MID <- dplyr::filter(MIDs_wvs, ccode == i, styear > 1945, hiact != 0)
+  last_MID_y <- 1945 # These variables essentailly just set all countries as
+  last_MID_q <- 1    # having an MID initiated in Q1 1945
+  y_Since <- 0
+  q_Since <- 0
+  
+  #Loop through each year
+  for (y in 1945:2010) {
+    
+    # Loop through each quarter.
+    for (q in 1:4) {
+      
+      # Start by detecting if any MIDs in current quarter and changing 
+      # necessary time measurement variables
+      new_n <- nrow(dplyr::filter(country_MID, # Bow before the modulus
+                                  styear == y & ((stmon + 2) %/% 3) == q))
+      
+      if (new_n > 0) {
+        last_MID_y <- y  # If there's a new MID, set reference date to current
+        last_MID_q <- q  # quarter, set boolean to ID a new MID in this quarter
+        new_MID <- 1     # and set time measurement variables back to zero.
+        y_Since <- 0
+        q_Since <- 0
+        }
+      
+      #Get information on MIDs for the following four quarters
+      coming_MIDs <- dplyr::filter(country_MID,
+                    (styear == y & q <= ((stmon + 2) %/% 3)) | 
+                    (styear == (y + 1) & q > (stmon + 2) %/% 3)) %>% 
+        summarise(orig_threat = sum(orig_threat),
+                  orig_display = sum(orig_display),
+                  orig_use = sum(orig_use), orig_war = sum(orig_war),
+                  participant = n(), constrained = n() + 1)
+      
+      # Compile all the information into the MID data.frame
+      all_MIDs[j,] <- c(i, y, q, as.numeric(coming_MIDs$orig_threat),
+                        as.numeric(coming_MIDs$orig_display),
+                        as.numeric(coming_MIDs$orig_use),
+                        as.numeric(coming_MIDs$orig_war),
+                        as.numeric(coming_MIDs$participant),
+                        as.numeric(ifelse(coming_MIDs$constrained == 1, 1, 0)),
+                        last_MID_y, last_MID_q, new_MID, y_Since, q_Since)
+      
+      j = j + 1             # Add 1 to reference for next row
+      q_Since = q_Since + 1 # Add one quarter since last MID
+      new_MID = 0 #Set default to no MID for next iteration
+    }
+    y_Since = y_Since + 1 #Add one year since last MID
+  }
+}
+
+# Remove all those variables slowing down your machine
+rm(country_MID, last_MID_y, last_MID_q, i, j, q, y, new_MID, q_Since, y_Since,
+   cc_euro, coming_MIDs, new_n)
+
+```
+
+```{r data_combine_euro}
+## Merge the Eurobarometer data with the MID data
+euro_MIDs <- left_join(euro_years, all_MIDs,
+                       by = c("Year" = "Year",
+                              "COW" = "COW",
+                              "Quarter" = "Quarter"))
+
+## Create binomial variables on the MIDs
+euro_MIDs$orig_threat_fac <- ifelse(euro_MIDs$Orig_Threat >=1, 1, 0)
+euro_MIDs$orig_disp_fac <- ifelse(euro_MIDs$Orig_Display >=1, 1, 0)
+euro_MIDs$orig_use_fac <- ifelse(euro_MIDs$Orig_Use >=1, 1, 0)
+euro_MIDs$orig_war_fac <- ifelse(euro_MIDs$Orig_War >=1, 1, 0)
+
+## Merge the dataframe with the conscription dataset
+euro_MIDs_2 <- dplyr::left_join(euro_MIDs, draft,
+                               by = c("COW" = "ccode", "Year" = "year"))
+## There were some missing draft values. I validated the extra years using the 
+## CIA's World Factbook
+
+## Merge in the ENPP data
+euro_MIDs_3 <- dplyr::left_join(euro_MIDs_2, enpp[2:6],
+                                by = c("COW" = "COW", "Year" = "Year"))
+
+## Remove Luxembourg since it has a small population that biases the results
+## in favor of the hypotheses
+euro_MIDs_4 <- dplyr::filter(euro_MIDs_3, Country != "Luxembourg")
+
+## Generate an attribute for the first year that a country was surveyed. This
+## was used for some fixed-effects models that don't remain in the final report
+## but were used as reference while writing.
+first_year <- dplyr::group_by(euro_MIDs_4, Country) %>%
+  dplyr::summarize(first_survey = min(Year))
+euro_MIDs_4 <- dplyr::left_join(euro_MIDs_4, first_year, by = "Country")
+```
+
+```{r euro_ts_frame, include = FALSE}
+## This chunk creates a standardized country-year data-frame that was used for
+## the fixed-effects models that did not return accurate results with the data
+## that was unbalanced.
+
+euro_impute_MIDs <- left_join(euro_impute, all_MIDs,
+                       by = c("Year" = "Year", "COW" = "COW", "Quarter" = "Quarter"))
+
+euro_impute_MIDs$orig_threat_fac <- ifelse(euro_impute_MIDs$Orig_Threat >=1, 1, 0)
+euro_impute_MIDs$orig_disp_fac <- ifelse(euro_impute_MIDs$Orig_Display >=1, 1, 0)
+euro_impute_MIDs$orig_use_fac <- ifelse(euro_impute_MIDs$Orig_Use >=1, 1, 0)
+euro_impute_MIDs$orig_war_fac <- ifelse(euro_impute_MIDs$Orig_War >=1, 1, 0)
+
+euro_ts <- dplyr::left_join(euro_impute_MIDs, draft,
+                               by = c("COW" = "ccode", "Year" = "year"))
+
+### For the missing draft values, I essentially just used the most recent. Need
+### to note that limitation
+
+euro_ts <- dplyr::left_join(euro_ts, enpp[2:6],
+                                by = c("COW" = "COW", "Year" = "Year"))
+
+euro_ts <- dplyr::filter(euro_ts, Country != "Luxembourg")
+
+first_year_ts <- dplyr::group_by(euro_ts, Country) %>%
+  dplyr::summarize(first_survey = min(Year))
+
+euro_ts <- dplyr::left_join(euro_ts, first_year, by = "Country")
+
+euro_ts <- dplyr::group_by(euro_ts, Country, Year) %>%
+  summarize_all(mean)
+
+euro_ts_2 <- as.data.frame(euro_ts)
+```
+
+```{r fixed_effects_model_evaluations, include = FALSE, eval = FALSE}
+## The following models are not included in the final report, but these were the
+## tests conducted to confim fixed, rather than random effects, and that a time
+## elemented was needed in the fixed effects models
+
+# Create fixed effect and random effects models
+euro_fixed <- plm::plm(Constraint ~ conf_mil * conf_press + recruit + ENPP +
+                         Proportional_Rep + poly(Y_Since, 3),
+                 model = "within", 
+                 data = euro_ts_2)
+
+euro_random <- plm::plm(Constraint ~ conf_mil * conf_press + recruit + ENPP +
+                         Proportional_Rep + poly(Y_Since, 3),
+                 model = "random", 
+                 data = euro_ts_2)
+
+# Hausman test confirms using fixed effects over random effects
+plm::phtest(euro_fixed, euro_random)
+
+# Add in time effects and conduct F Test
+euro_fixed_time <- plm::plm(Constraint ~ conf_mil * conf_press + recruit + ENPP +
+                         Proportional_Rep + poly(Y_Since, 3) + factor(Year),
+                 model = "within", 
+                 data = euro_ts_2)
+plm::pFtest(euro_fixed_time, euro_fixed)
+
+# This is the same as the above test above
+plm::plmtest(euro_fixed, effect = c("time"), type = c("bp"))
+
+# Final fixed-effects model
+euro_fixed_time <- plm::plm(Constraint ~ conf_mil * conf_press + recruit + ENPP +
+                         Proportional_Rep + poly(Y_Since, 3),
+                 model = "within", effect = "time", 
+                 data = euro_ts_2)
+```
+
+```{r euro_ols_models, include = FALSE}
+## Creates the OLS and Fixed-Effects models for tables 2 and 4. The "simple" 
+## models do not include the interaction terms
+
+# Threat as dependent variable
+euro_ols_threat_simple <- lm(Orig_Threat ~ conf_mil + conf_press + recruit +
+                               ENPP + Proportional_Rep + poly(Q_Since, 3),
+               data = euro_MIDs_4)
+summary(euro_ols_threat_simple)
+
+euro_ols_threat <- lm(Orig_Threat ~ conf_mil * conf_press + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+               data = euro_MIDs_4)
+summary(euro_ols_threat)
+
+euro_fixed_time_threat <- plm(Orig_Threat ~ conf_mil * conf_press + recruit +
+                                     ENPP + Proportional_Rep + poly(Y_Since, 3),
+                 model = "within", effect = "time",
+                 data = euro_ts_2)
+summary(euro_fixed_time_threat)
+
+# Use as dependent variable
+euro_ols_use_simple <- lm(Orig_Use ~ conf_mil + conf_press + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+               data = euro_MIDs_4)
+summary(euro_ols_use_simple)
+
+euro_ols_use <- lm(Orig_Use ~ conf_mil * conf_press + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+               data = euro_MIDs_4)
+summary(euro_ols_use)
+
+euro_fixed_time_use <- plm(Orig_Use ~ conf_mil * conf_press + recruit +
+                                     ENPP + Proportional_Rep + poly(Y_Since, 3),
+                 model = "within", effect = "time", 
+                 data = euro_ts_2)
+summary(euro_fixed_time_use)
+
+# Constraint as dependent variable
+euro_ols_constraint_simple <- lm(Constraint ~ conf_mil + conf_press + recruit +
+                                   ENPP + Proportional_Rep + poly(Q_Since, 3),
+                 data = euro_MIDs_4)
+summary(euro_ols_constraint_simple)
+
+euro_ols_constraint <- lm(Constraint ~ conf_mil * conf_press + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+                 data = euro_MIDs_4)
+summary(euro_ols_constraint)
+
+euro_fixed_time_constraint <- plm(Constraint ~ conf_mil * conf_press + recruit +
+                                     ENPP + Proportional_Rep + poly(Y_Since, 3),
+                 model = "within", effect = "time", 
+                 data = euro_ts_2)
+summary(euro_fixed_time_constraint)
+```
+
+```{r euro_logit_models, include = FALSE}
+## Creates the logit models for table 3 below. The "simple" models do not 
+## include the interaction terms.
+
+# Threat as dependent variable
+euro_logit_threat_simple <- glm(orig_threat_fac ~ conf_mil + conf_press +
+                                  recruit + ENPP + Proportional_Rep +
+                                  poly(Q_Since, 3),
+                  data = euro_MIDs_4, family = "binomial")
+summary(euro_logit_threat_simple)
+
+euro_logit_threat <- glm(orig_threat_fac ~ conf_mil * conf_press + recruit +
+                           ENPP + Proportional_Rep + poly(Q_Since, 3),
+                  data = euro_MIDs_4, family = "binomial")
+summary(euro_logit_threat)
+
+# Use as dependent variable
+euro_logit_use_simple <- glm(orig_use_fac ~ conf_mil + conf_press  + recruit +
+                               ENPP + Proportional_Rep + poly(Q_Since, 3),
+                 data = euro_MIDs_4, family = "binomial")
+summary(euro_logit_use_simple)
+
+euro_logit_use <- glm(orig_use_fac ~ conf_mil * conf_press + recruit + ENPP +
+                  Proportional_Rep + poly(Q_Since, 3),
+                  data = euro_MIDs_4, family = "binomial")
+summary(euro_logit_use)
+
+# Constraint as dependent variable
+euro_logit_constraint_simple <- glm(Constraint ~ conf_mil + conf_press +
+                                      recruit + ENPP + Proportional_Rep +
+                                      poly(Q_Since, 3),
+                    data = euro_MIDs_4, family = "binomial")
+summary(euro_logit_constraint_simple)
+
+euro_logit_constraint <- glm(Constraint ~ conf_mil * conf_press + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+                 data = euro_MIDs_4, family = "binomial")
+summary(euro_logit_constraint)
+```
+
+```{r euro_ols_models_appendix, include = FALSE}
+## Creates the OLS models for Appendix B
+
+# Threat as dependent variable
+euro_ols_threat_simple_no_t <- lm(Orig_Threat ~ conf_mil + conf_press +
+                                    recruit + ENPP + Proportional_Rep,
+               data = euro_MIDs_4)
+summary(euro_ols_threat_simple_no_t)
+
+euro_ols_threat_no_t <- lm(Orig_Threat ~ conf_mil * conf_press +
+                             recruit + ENPP + Proportional_Rep,
+               data = euro_MIDs_4)
+
+euro_fixed_time_threat_no_t <- plm(Orig_Threat ~ conf_mil * conf_press + recruit +
+                                     ENPP + Proportional_Rep,
+                 model = "within", effect = "time",
+                 data = euro_ts_2)
+
+# Use as dependent variable
+euro_ols_use_simple_no_t <- lm(Orig_Use ~ conf_mil + conf_press + recruit +
+                                 ENPP + Proportional_Rep,
+               data = euro_MIDs_4)
+
+euro_ols_use_no_t <- lm(Orig_Use ~ conf_mil * conf_press + recruit + ENPP +
+                 Proportional_Rep,
+               data = euro_MIDs_4)
+
+euro_fixed_time_use_no_t <- plm(Orig_Use ~ conf_mil * conf_press + recruit +
+                                     ENPP + Proportional_Rep,
+                 model = "within", effect = "time", 
+                 data = euro_ts_2)
+
+# Constraint as dependent variable
+euro_ols_constraint_simple_no_t <- lm(Constraint ~ conf_mil + conf_press +
+                                        recruit + ENPP + Proportional_Rep,
+                 data = euro_MIDs_4)
+
+euro_ols_constraint_no_t <- lm(Constraint ~ conf_mil * conf_press + recruit +
+                                 ENPP + Proportional_Rep,
+                 data = euro_MIDs_4)
+
+euro_fixed_time_constraint_no_t <- plm(Constraint ~ conf_mil * conf_press +
+                                         recruit + ENPP + Proportional_Rep,
+                 model = "within", effect = "time", 
+                 data = euro_ts_2)
+```
+
+```{r euro_logit_models_appendix, include = FALSE}
+## Creates the Logit models for Appendix B
+
+# Threat as dependent variable
+euro_logit_threat_simple_no_t <- glm(orig_threat_fac ~ conf_mil + conf_press  +
+                                       recruit + ENPP + Proportional_Rep,
+                  data = euro_MIDs_4, family = "binomial")
+
+euro_logit_threat_no_t <- glm(orig_threat_fac ~ conf_mil * conf_press +
+                                recruit + ENPP + Proportional_Rep,
+                  data = euro_MIDs_4, family = "binomial")
+
+# Use as dependent varaible
+euro_logit_use_simple_no_t <- glm(orig_use_fac ~ conf_mil + conf_press +
+                                    recruit + ENPP + Proportional_Rep,
+                 data = euro_MIDs_4, family = "binomial")
+
+euro_logit_use_no_t <- glm(orig_use_fac ~ conf_mil * conf_press + recruit +
+                             ENPP + Proportional_Rep,
+                  data = euro_MIDs_4, family = "binomial")
+
+# Constraint as dependent variable
+euro_logit_constraint_simple_no_t <- glm(Constraint ~ conf_mil + conf_press +
+                                           recruit + ENPP + Proportional_Rep,
+                    data = euro_MIDs_4, family = "binomial")
+
+euro_logit_constraint_no_t <- glm(Constraint ~ conf_mil * conf_press + recruit +
+                                    ENPP + Proportional_Rep,
+                 data = euro_MIDs_4, family = "binomial")
+
+```
+
+```{r other_insts_appendix, include = FALSE}
+## Creates the models for Appendix C. Trust in different institutions is
+## interacted with trust in the military in each of these models
+
+euro_parl <- glm(Constraint ~ conf_mil * conf_parl + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+                 data = euro_MIDs_4, family = "binomial")
+
+euro_UN <- glm(Constraint ~ conf_mil * conf_UN + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+                 data = euro_MIDs_4, family = "binomial")
+
+euro_gov <- glm(Constraint ~ conf_mil * conf_gov + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+                 data = euro_MIDs_4, family = "binomial")
+
+euro_EU <- glm(Constraint ~ conf_mil * conf_EU + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+                 data = euro_MIDs_4, family = "binomial")
+
+euro_relig <- glm(Constraint ~ conf_mil * conf_relig + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+                 data = euro_MIDs_4, family = "binomial")
+
+euro_all <- glm(Constraint ~ conf_mil * conf_all + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+                 data = euro_MIDs_4, family = "binomial")
+```
+
+
+### Abstract
+
+Does public confidence in a democracy's armed forces incentivize or constrain
+that country's use of military force? Research on the theory of "democratic
+constraint" has identified key democratic mechanisms that limit a leader from
+utilizing military force. With this paper, I attempt to find the role that
+public opinion about the military plays in enabling or constraining when 
+democracies utilize military force. I hypothesize that higher expressed trust in
+the military leads democracies to use force more frequently. However, when trust
+in the military is similar to the level of trust in the press, even if the 
+former is high, a country will be more constrained from using force. Support for 
+the first proposition is inconclusive, but I find that high trust in the 
+military commensurate with trust in the press increases the democratic 
+constraint mechanism.
+
+#####
+
+### Acknowledgments
+
+Thank you to Professor Robert Shapiro, my advisor for this thesis. His guidance 
+made this project better at every step of the way. Thanks to my QMSS professors 
+Dawn Brancati and Greg Eirich for helpful feedback at the initial stages of this 
+project. Thanks to Katherine for her support throughout this program.
+
+#####
+
+### 1. Introduction
+
+In Christopher Gelpi's review of research on democracies in conflict, the author
+identifies the "direct causal impact of democracy on foreign policy"
+[-@gelpi_2017, 1940] as a research gap in international relations. Although 
+there has been extensive research on how democratic publics respond to their 
+countries' use of force, there has been less empirical research
+to identify the causal mechanisms, particularly those of mass public opinion,
+that either constrain or embolden the use of military force by democratic
+leaders. This is understandable as political polling about foreign policy is 
+difficult in anticipation of events, but is often a response to events. 
+
+Using survey data about trust in institutions taken from the Eurobarometer 
+study series, this study attempts to test whether ex ante opinions about
+the military can be a leading indicator of a democracy's likelihood of
+using or not using military force. Following this introduction, the second
+section of this article reviews relevant literature and develops theory about 
+the democratic use of force. The third section builds two measureable hypotheses 
+about the linkage between mass public opinion of the military relative to the 
+press and the use of force. The fourth section provides an overview of the data 
+and methods that will be employed in this study. The fifth section presents the 
+results of the pooled time-series cross-sectional analysis using Ordinary Least
+Squares (OLS) and logistic regression (logit) and the implications of these 
+results. The sixth section applies a predictive Random Forests model to the 
+statistically significant models from the fifth section to analyze the models 
+for additional robustness. The seventh section outlines limitations of this 
+study and potential areas for future research. The final section summarizes and
+concludes the study.
+
+### 2. Relevant Works and Theory
+
+Democratic peace theory provides much of the theoretical justification for 
+explaining how domestic institutions can affect the use of force by democracies.
+The fact that democracies do not go to war with each other [@maoz_russet_1993] 
+is well established, but there is not a consensus for how democracies elect to
+participate in armed conflicts. Fearon's -@fearon_1994 "audience costs" 
+explanation is that democracies may be better than autocracies at signaling 
+their intentions and providing information on their resolve during a crisis, 
+since democratic leaders pay greater prices from the public for backing down
+in a crisis. @schultz_1999 studied the responses of states to a democracy during
+a crisis and found empirical support of this informational perspective advanced
+by Fearon. In another prominent explanation, @bbs_1999 posited an institutional
+explanation for the democratic peace. This argument states that domestic
+institutions make democratic leaders likely to attack other states only when 
+they perceive victory and that democratic societies may be better at mobilizing
+in war efforts, therefore making democracies poor targets for other states.
+However, Gartzke argues that capitalism is the main peace driver 
+[-@capitalist_peace]. Replication of some studies has found that some of the
+statistical results in support of the capitalist [@choi_2011] or democratic peace 
+[@downes_2012] comes from flawed design methods. @downes_2012 [p. 485] contends
+that even if audience costs exist, they do not actually bolster the
+effectiveness of democratic threats.
+
+Rosato [-@rosato_2003] provides the most robust criticism of the explanations 
+for democratic peace theory. Among them, he lays out three reasons why a 
+domestic public's constraint of leaders is not an effective explanation of 
+democratic peace: war costs usually fall on a small subset of the population, 
+public nationalism may overwhelm public constraint, and democratic leaders are 
+as likely to lead as to follow public opinion. These three arguments are 
+relevant to my research question, which is rooted in the idea of a democratic 
+constraint or a democratic push towards the use of force. Rosato's first
+criticism is well founded as military conscription has slowly been eliminated 
+from many democracies [@conscription], suggesting that the use of force is less 
+pertinent to a whole population. @downes_2012 found that the Johnson 
+administration viewed the public as a crucial factor in the United States's 
+escalation of the war in Vietnam, giving some credence to Rosato's second 
+argument. It is unclear if high public trust of a nation's military may be a 
+nationalistic signal from the public that leaders interpret as a tacit approval 
+for the use of force.
+
+Addressing Rosato's last argument, conventional wisdom had been that politicians
+could "waltz before a blind audience" on issues of foreign policy
+[@aldrich_1989]. However, belief in the Almond-Lippmann consensus that
+public opinion is volatile, incoherent, and of limited impact was less
+pervasive by the end of the Cold War [@holsti_1992]. @shapiro_page_1988 found
+that public opinion on foreign policy was relatively stable and rational through
+the late 20th century. This was true in other western European democracies 
+[@rational_public_comparitive]. @jentleson_1992 showed that public support in 
+the US hinged upon the importance of an intervention's "principal policy 
+objective," demonstrating that the public did not blindly follow elite cues and 
+could distinguish which interventions coincided with their policy beliefs. 
+@tomz_weeks_2013 found that publics in the US and UK were less supportive of the
+use of force against democracies.
+
+Research on the effect of casualties on public opinion also supports the
+"rational public" view. @mueller_1971 found public opinion to respond to the log
+of casualties in the Vietnam and Korean wars. @eichenberg_2005 showed that US
+public support for US interventions depended upon the perception that the US was
+restraining adversaries (not peacekeeping) and that there was a low perceived 
+risk of casualties. @gelpi_et_al_2006 demonstrated that the US public makes 
+"reasoned and reasonable" (8) judgments about causalities to support successful
+interventions.
+
+Nonetheless, some research suggests that elite cues are the biggest driver of 
+public opinion about foreign policy. Studying US public opinion of the 2003 Iraq
+War and World War Two, @berinsky_2007 found that elite agreement fostered 
+higher public opinion of the wars. Therefore, when an elite consensus prevailed, 
+the public gave elites "great latitude to wage war" (975). However, elite cues 
+were found to be important only at the beginning of the Iraq War, after which 
+"reality" (information about the war) became a more important driver of public 
+opinion [@baum_groeling_2010]. 
+
+If elite frames are most important at the beginning of a war, it suggests that
+public opinion may be pliable to the suggestions of a democracy's leadership
+before a foreign policy is implemented and that ex ante public opinion itself is
+simply a response to elite framing. Therefore, the question remains whether
+foreign policy behavior is actually altered by mass public opinion. 
+@gelpi_2017 found much of the case study literature on the causal impact of 
+democracy on foreign policy to be inconclusive. @shapiro_2011 found that policy 
+responsiveness to public opinion for all policies in the US has generally 
+decreased. In an experiment with current and former Israeli parliament members, 
+most expressed that they would at least partially consider public opinion 
+regarding the use of force and were especially unlikely to contravene public 
+opinion  [@tomz_et_al_2018]. However, we don't know how these parliament members 
+would respond to real crises.
+
+Baum and Potter [-@baum_potter_2015] presents the best case for linking public 
+opinion and foreign policy behavior, as they show that a robust oppositional 
+party structure and widespread media access reduce participation in wars though 
+mechanisms that create domestic audience costs. Their theory states that 
+opposition parties may present criticisms of a government's foreign policy, but
+without media access, publics cannot hear these criticisms and exercise 
+democratic constraint upon their leaders. Baum and Potter's study design  
+of democracies as non-homogeneous entities with differing domestic structures, 
+rather than as one side of a binary democracy-autocracy variable, was key to 
+identifying this structure. @palmer_et_al_2004 also found that treating
+democracies homogeneously masked variations in outcomes. For example, political
+"left" governments were likelier to escalate their countries' conflicts, but 
+"right" governments were likelier to be involved in more militarized disputes. 
+The authors suggest that domestic political incentives  mean "right" governments 
+are less likely to face removal from office for using force. @rissekappen_1991 
+noted how domestic democratic structures of political institutions, policy 
+networks, and societal structures affected the responsiveness of foreign policy 
+to public opinion in the US, France, Germany, and Japan. @leblang_chan_2003 
+found that proportional-representation systems were significantly correlated 
+with less war involvement. 
+
+Therefore, measuring which divergent domestic structures in democracies affect 
+foreign policy behavior will help to improve the understanding of how "audience
+costs" function. My research focuses on public, pre-crisis trust or confidence
+in the military. @golby_et_al_2018 shows that military leaders could exert
+sizable influence on public support of military operations in the US. This may
+reflect how confidence in national institutions has fallen for years, except for
+the military where confidence has remained above 70% for all but one year since 
+2001 [@gallup_2018]. In Europe, "trust" in the military averages over 70% while 
+trust in other institutions is rarely over 50% [@eurobarometer_2018]. This
+contrast between confidence in the military and other institutions suggests it 
+is a worthwhile phenomenon to study.
+
+I focus on whether public trust in a democracy's military affects democratic
+leaders' choices of emphasizing militarized or non-militarized solutions to real
+or perceived foreign policy crises. I theorize that high domestic confidence in a 
+military is neither necessary nor sufficient for a democracy to escalate towards
+conflict, but will probabilistically increase the incentive structure for a
+democracy's leadership towards the use of military force. Absent an ongoing 
+conflict, this also suggests that the converse should be true: a state will be 
+constrained from using military force when approval of the military is low, all
+other factors being equal.
+
+This line of argument is based on theoretical propositions laid out by the 
+institutional explanation for democratic peace theory. Bueno de Mesquita et al 
+[-@bbs_1999, 799-804] argued that democratic leaders generally only attack other 
+countries when they anticipate victory and that democratic leaders are better
+able to shift resources into a war effort, giving them an advantage over
+autocracies. Public perceptions about the military, measured in public opinion 
+surveys as either trust or confidence in the military, are likely to modify or 
+distort the views and choices that democratic leaders make about the benefits of
+the use of military force. High confidence in the military may lead to an
+inflated perception that one's military is capable of easily solving foreign
+policy problems, i.e. of anticipating victory even if it is not the best
+mechanism by which to do so. A feedback loop of providing more resources to the
+military likely creates an ongoing belief that it is a better and more capable 
+force for taking on more wide-spread problems. I argue that increased or
+decreased public trust in the military increases or decreases, respectively, a
+democratic leader's perceptions that the military will be able to solve foreign 
+policy crises.
+
+However, high approval of the military could also provide a type of restraining 
+mechanism on the use of force in international crises. @eichenberg_2005 found
+that public opinion regarding military interventions was higher when there is a 
+low real or perceived risk of casualties. High approval of the military may have
+two competing effects on the casualty rationale. First, high approval or trust 
+in the military may, through the overestimation of capabilities, lower the 
+number of expected casualties that the military could suffer for any type of 
+intervention. This would make a leader probabilistically more likely to utilize 
+military force in response to a foreign policy crisis. However, the popularity 
+of the military may also make the public less tolerant of a leader that is 
+perceived as reckless in the use of military force. The coupling of these two 
+phenomena in a country with high approval of its military likely creates a 
+leadership incentive structure that rewards and overemphasizes 
+low-perceived-risk military solutions. High trust or approval in the military
+likely increases the probability that a leader will issue militarized threats
+as a signal to his or her domestic audience. Likewise, high trust or approval
+in the military will increase the likelihood that a democratic leader will use
+force, but not necessarily force that escalates towards a war that may endanger
+too many lives.
+
+Extending upon [@baum_groeling_2010], which emphasizes that the 'elasticity of 
+reality' at the beginning of war permits a country's leadership to dominate the 
+public's beliefs about the war, I posit that the relative trust between the 
+military and the press is the most important domestic institutional 
+relationship. If the military alone is popular, a leader can more easily present
+a military solution for a country's foreign policy problem. However, if a public 
+trusts both its military and its press, a military solution will face more
+scrutiny from the public and opposition politicians. Low trust in both
+institutions will likely lead to public scrutiny of a military option that would 
+already be unpopular.
+
+This is an inductive theory based upon the exploratory analyses done in the 
+subsuquent sections of this study. I initially explored the relationship between
+the military and a range of domestic institutions, but the data availability 
+for other institutions was more limited and perceptions about other institutions 
+were more partisan. However, I had focused on "the Press" in comparison to the 
+military because of research showing how confidence in the two institutions has 
+diverged in the United States [@press_mil] and the importance of press access in 
+enabling democratic constraint [@baum_potter_2015]. I have modified the study to 
+focus more on the relationship between the military and press with some limited,
+initial insight into the final results. However, I have tried to maintain the
+study design proposed from the start and have simply focused on the press versus
+a wider range of domestic institutions.
+
+I propose the theory that high trust in the military commensurate with low trust
+in the press creates the conditions in a democracy where leaders perceive 
+benefits for emphasizing the use of military force in their foreign policy 
+behavior. This occurs because democratic leaders overemphasize the military's 
+capabilities and underemphasize potential drawbacks. The press provides a 
+mechanism by which to question these assumptions, particularly with regard to 
+potential casualties and the principal policy objective being proposed. However,
+if the public does not trust its press, it will be less likely to consider these 
+criticisms as valid. If trust in both institutions is low, the militarized frame 
+will still dominate since it cannot be countered effectively, though the effect
+will be lower since leaders will not inflate capabilities as much as when the
+military has high trust relative to the press. If trust in both institutions is
+high, the rational public's view will dominate and military force will only be 
+used in response to a critical view of the proposed use of force. If trust in 
+the press were to surpass trust in the military, the militarized framing by 
+leaders would be even further restricted.
+
+### 3. Hypotheses
+
+Based on the above theoretical arguments, I argue that public confidence in the 
+military relative to the press provides a valid measurement for whether a 
+country is predisposed for or against the use of force. I propose that measures 
+of trust in the military and trust in the press will interact with one another. 
+Even if the trust levels of both institutions are commensurate with one another 
+at low levels, a militarized narrative can dominate public discourse since the 
+media is not trusted to display critical or oppositional narratives. The use of 
+force that would be enabled by domestic trust of the military exists because 
+militarized solutions can dominate public discourse about foreign policy. 
+However, if measures of both institutions are high, they should enhance the role
+of democratic constraint as publics are exposed to and trusting of critical and
+oppositional narratives about the use of force, and may be particularly exposed
+to narratives that emphasize potential casualities in the military.
+
+Based upon the above logic, I posit the following two hypotheses:
+
+> $H1$: A democracy is more likely to initiate military threats or initiate the 
+use of force when measures of trust in the military are disproportionately
+higher than measures of trust in the press.
+
+> $H2$: A democracy is more likely to be constrained from using force when 
+measures of trust in the military are comparable or lower than measures of trust
+in the press.
+
+### 4. Data and Methods
+
+To measure my dependent variables for the two hypotheses, I will use the 
+Correlates of War participant-level Militarized Interstate Disputes (MID) 
+dataset [@mid_4]. I use MIDs of European countries between 1997 and 2010 in 
+order to match with the available survey data for my independent variables. For 
+H1, my dependent variable is measured by whether a country initiates an MID in 
+the twelve months of interest. All disputes in the the MID dataset are 
+categorized based upon the highest action level that a dispute reaches. The five 
+escalating action levels are no military threat, a threat to use military force,
+a show of military force or alert, a use of force or declaration of war, and
+beginning or joining an interstate war. 
+
+I model two different dependent variables for a state that initiates an MID. The 
+first dependent variable, an MID threat, represents all threats to use force or 
+higher (to include threats, displays of force, uses of force, and war). The 
+second dependent variable models a state initiating the use of force or higher 
+(including only uses of force and war). In reality, there are no instances of 
+interstate war in my dataset, so the use of force variable only applies to 
+clashes and blockades short of war. I keep the use of force in the first 
+dependent variable construct on the assumption that most uses of force will be 
+preceded by a threat or signalling display of military capabilities. For the OLS
+models, these variables are measured as the number of threats or uses of force 
+that a country initiates. For the logit models, I measure a binominal factor of 
+whether a country initiates any threats or uses of force as a 1, and no 
+initiations of a threat or use of force as a 0.
+
+For H2, my dependent variable is for constraint from the use of force. I measure
+this variable by a lack of participation in an MID or a peaceful response to an 
+MID initiated by another country in the twelve months of interest. This variable
+does not include instances where states join an ongoing conflict as part of an 
+alliance, or where they respond with military action to another state's threat. 
+Whereas the variables in H1 measure a state's initiating a threat or use of 
+force, H2 measures a state's constraint from issuing threats or using force 
+along with peaceful reactions to other states' potentially provocative actions.
+For both the OLS and logit models, I measure this binomial variable as a 1 for a
+state that meets the requirements for being constrained and a 0 for a state that 
+does not.
+
+In comparison to the dependent variables, most of the corresponding independent
+variables will be lagged by four quarters in order to control for endogeneity
+issues in which opinions of a country's institutions may be modified by current 
+or recent military involvement. A series of Granger causality tests conducted 
+using the lmtest package in R confirms that trust in the military is not
+directly affected by the dependent variables.
+
+```{r granger_test, include = FALSE, eval = FALSE}
+## Granger causality tests from the above paragraph
+library(lmtest)
+grangertest(Constraint ~ conf_mil, order = 3, data = euro_ts_2)
+grangertest(Orig_Threat ~ conf_mil, order = 3, data = euro_ts_2)
+grangertest(Orig_Use ~ conf_mil, order = 3, data = euro_ts_2)
+```
+
+```{r mid_summary, include = TRUE}
+## Table 1 that shows frequency of MIDs by country at time t, compared to 
+## surveys conducted at t-1
+
+mid_summary <- euro_MIDs_4 %>% dplyr::group_by(Country) %>%
+  dplyr::summarize(n_surveys = n(), Constrained = sum(Constraint), 
+                   Use = sum(Orig_Use) - sum(Orig_War),
+                   Display = sum(Orig_Display) - sum(Orig_Use),
+                   Threat = sum(Orig_Threat) - sum(Orig_Display),
+                   Last_Two_Combined = sum(Orig_Threat) - sum(Orig_Use))
+
+## I use this construct here and in subsequent chunks to allow for knitting into
+## html or Microsoft Word since the kable tables do not knit well in Word
+
+if(doc.type == "docx") {
+  flextable(mid_summary, cwidth = 1.0, cheight = 0.25) %>%
+    font(fontname = "Times") %>% 
+    fontsize(size = 11) %>% padding(padding = 0) %>% 
+    add_header_lines(values = c("Table 1: MIDs and Survey Counts by Country")) %>% 
+    add_footer_lines("Surveys Included: Number of surveys available for country\nConstrained: Number of instances a country is measured as being constrained\nUse: Number of times country has at least 1 Use of Force\nDisplay: Number of times a country has at least one display of force\nThreat: Number of times a country has at least one display of force\nDisplay & Threat: Number of times a country has at least one display or one threat of force, or both") 
+} else {
+  kable(mid_summary, col.names = c("Country", "Surveys\nIncluded",
+                                   "Constrained", "Use", "Display",
+                                   "Threat", "Display +\nThreat")) %>% 
+    add_header_above(header = c("Table 1: MIDs and Survey Counts by Country" = 7))
+}
+```
+
+In H1, I measure a country initiating an MID, whereas in H2 I measure democratic
+constraint mechanisms. Neither variable includes a third or fourth type of
+actor, one that uses military force in response to an initiator or one that uses
+military force in joining a coalition. The three dependent variable constructs, 
+therefore, model different aspects of MIDs, but do not include all ways in which
+a country may enter into an MID. I use the shorthand of Threat, Use, and
+Constraint in describing models that measure the dependent variable of MIDs for
+threats or higher, for the use of force, or for democratic constraint, 
+respectively. The distribution of these events by country is displayed in the
+table above. Of note is the lack of interstate wars in this data subset. 
+Therefore, any results from the Use model will only be measurements of
+interstate strikes or operations, but not full wars. In addition, this dataset
+includes only interstate conflicts, so would not include, for example, 
+peacekeeping operations or military actions against non-state terrorist groups.
+
+Looking at the example of Spain illustrates the difference between the various
+dependent variable categories. Spain participated in no MIDs in 1997 and none in
+1998 until it joined the international condemnation of Yugoslav military 
+activity in response to aggression against Kosovo in November 1998. According 
+to the MID dataset, this began with military exercises and shows of force in 
+1998 before the international bombing campaign began in 1999. However, Spain is
+not listed as being an originator of this MID since it was a response to 
+Yugoslav actions. Therefore, Spain is neither listed as originating a threat or 
+use of force, but it is not listed as being constrained from using force either 
+since it did participate in multilateral action against the Yugoslav government.
+In April 1999, Spain did not respond to a Russian deployment of battleships into
+the Adriatic Sea as a Russian response to the NATO bombing campaign. Therefore, 
+Spain would be listed as having been constrained in the following twelve months,
+if not for its participation in another MID in February 2000 in which Spain 
+participated in the initiation of a NATO threat against Yugoslav forces that
+continued to patrol the border with Kosovo. In November 2000, Spain was part of 
+a threat in which Yugoslavia issued a 72 hour deadline to Kosovo forces and NATO
+to stop cross-border Kosovar raids into Yugoslavia. The eventual results of this
+MID were the stopping of raids and a negotiation of a ceasefire between Kosovar
+forces and Yugoslavia. In this instance, Spain is listed as being constrained
+since it did not respond with any military activity. In October 2001, Spain 
+deployed warships into the eastern Mediterranean in support of NATO actions in 
+Afghanistan following the September 11th, 2001 attacks on the United States. In 
+this instance, Spain is coded as a 0 for all dependent variables as it neither 
+initiated an MID nor was it constrained from deploying forces as part of an 
+alliance that had already begun operations. 
+
+In July 2002, Spain deployed warships in response to the deployment of 
+Moroccan troops to an island near the Spanish enclave of Ceuta that is claimed 
+by both countries. In this instance, Spain is coded as a 0 for the dependent 
+variables as it is not an originator of the MID, but was not constrained since 
+it deployed military forces. In December 2002, Spain seized two North Korean 
+ships that were accused of carrying SCUD missiles to Yemen. Spain is coded as an 
+initiator of a use of force in this instance as it initated the seizure of the 
+North Korean shipment. Similarly, in July 2003, Spain seized a South Korean 
+weapons shipment to Senegal, which is also categorized as a Spain initiated use 
+of force.
+
+Notably, Spain's participation in the Iraq war is not listed as an MID in this
+dataset, though it would heavily shape the foreign policy of Spain after 2004.
+This is likely a result of Spain's explicit statements that it would not have
+a "combat role" in Iraq [@spain_iraq_begin] and would only send medical support
+and anti-mine capabilities. Spain generally tried to characterize its 
+participation in this mission as a peacekeeping mission. This may have also been
+indicative of the initial role of democratic constraint in Spain, as the 
+deployment led to many antiwar protests against the Spanish Prime Minister.
+After Spain's one year contribution to the Multi-National Force - Iraq from
+April 2003 to April 2004, Spain had a decidedly less active foreign policy,
+consistent with the arguments of democratic constraint theory. The conservative
+Prime Minister of Spain, Jose Maria Aznar, and his conservative People's Party 
+were defeated in 14 March 2004 elections that closely followed the 11 March 2004
+terrorist attack on Madrid's main train station and trains in the city. The 
+election was viewed as a response to the "support for the war in Iraq" and 
+"handling of the Madrid bombing" by the Conservative government 
+[@spain_iraq_pullout]. For the remaining portion of the this study, from 2004 
+through 2010, Spain participated in no MIDs and had a positive value for 
+democratic constraint in all the remaining years.
+
+Also worth noting is that Spain continued to have active peacekeeping 
+deployments following its withdrawal from Iraq. Jose Luis Rodriguez Zapatero,
+the Spanish PM elected in 2004, stated shortly after Spain's withdrawal from Iraq
+that it would continue to participate in worldwide peacekeeping missions. The PM
+cited 3,000 troops deployed to peacekeeping missions in Afghanistan and the 
+Balkans that remained after the pullout from Iraq [@spain_iraq_peacekeeping]. 
+Although peacekeeping involves military deployments, they differ from MIDs in 
+that they are built upon diplomatic consensus of multilateral mandates, rather 
+than one state's or alliance's actions. Most of the countries in the sample
+participate in peacekeeping missions, including in periods when they are listed 
+as being democratically constrained.
+
+To measure public opinion of the militaries and press in the European countries
+listed in Table 1, I have compiled survey data from 15 iterations of the 
+Eurobarometer survey series between 1997 and 2009 (@euro_48, @euro_51, 
+@euro_54_1, @euro_55_1, @euro_56_2, @euro_57_1, @euro_59_1, @euro_60_1, 
+@euro_61_0, @euro_62_0, @euro_64_2, @euro_66_1, @euro_68_1, @euro_69_2, 
+@euro_72_4). MID data is available through 2010, therefore these surveys will be 
+matched against the MID dependent variables for the four quarters following when
+the survey was conducted. As of this writing, there are five additional 
+Eurobarometer surveys which could be matched against a future MID release.
+
+Each of these surveys includes nationally-representative samples of European
+Union countries' populations (primarily just Western Europe before 2004). More
+information on the Eurobarometer surveys is in Appendix A. To measure approval
+of the military and press, the surveys asked citizens if they "trust" a series 
+of institutions, including the military (which is referred to as "the Army" in
+the Eurobarometer polls) and "the Press." I coded the data so that
+a 1 indicates trust, and a -1 indicates non-trust. Answers of "Don't Know" were 
+removed from the survey. These results were then averaged into country-quarter 
+aggregates. This coding does not change the results of the OLS and Logit models.
+However, using this coding, as opposed to a 0 to 1 scale, better highlights the 
+interaction effects at extreme values of trust in the military and trust in the
+press that are posited by the this paper's theory.
+
+<div class="centered">
+```{r survey_years, echo = FALSE}
+## Generates Plot 1, the overview of surveys utilized by country, by year
+euro_MIDs_4$disp <- factor(euro_MIDs_4$Country,
+                           levels = rev(unique(euro_MIDs_4$Country)))
+gg_desc <- ggplot(data = euro_MIDs_4,
+                  aes(x = Year, y = disp, color = as.factor(Quarter))) +
+  geom_jitter(width = 0.15) + ylab("Country") + labs(color = "Quarter") + 
+  theme(legend.position = "bottom") +
+  scale_x_continuous(breaks =c(1996, 2000, 2004, 2008, 2012)) +
+  ggtitle("Plot 1: Eurobarometer Surveys\nby Country, Year, Quarter") +
+  theme(plot.title = element_text(hjust = 0.5))
+gg_desc
+```
+</div>
+
+The graphic above shows which countries were surveyed and in what years. 
+Austria, Belgium, Denmark, Finland, France, Germany, Greece, Ireland, Italy, The 
+Netherlands, Portugal, Spain, Sweden, and the United Kingdom were included from
+1997. Bulgaria, Croatia, the Czech Republic (or Czechia), Estonia, Hungary, 
+Latvia, Lithuania, Poland, Romania, the Slovak Republic, Slovenia, and Turkey 
+were included from 2004. Macedonia was added in 2007. Most countries were 
+surveyed almost annually upon inclusion in the Eurobarometer survey series, 
+sometimes twice in a year. Measures of trust in institutions from
+the Eurobarometer surveys exhibit a high level of collinearity. At an
+individual level, all measures of trust in various institutions exhibited a
+positive correlation. At an aggregate country level, many of the same 
+collinearity issues hold; however, "the Army" and "the Press" have a negative 
+correlation that suggests they measure different concepts. The correlation 
+matrix below shows the correlation between the aggregate trust in institutions 
+in the seven institutions for which I had the most survey results in the 15 
+Eurobarometer surveys.
+
+<div class="centered">
+```{r aggregate_responses, echo = FALSE}
+## Generates Plot 2, the correlational Matrix between trust in different 
+## institutions
+corrgram::corrgram(euro_MIDs_4[c(5:11)],  labels = c("Army", "Press",
+                              "Parlament", "UN", "National \nGovernment",
+                              "EU", "Religious \nInstitutions"),
+                   upper.panel = panel.conf,
+                   lower.panel = panel.fill, order = TRUE,
+                   main = "Plot 2: Correlation of Trust in Institutions")
+```
+</div>
+
+The following graphic displays the levels of trust in the military in comparison
+to trust in the press. Almost all surveyed countries demonstrated a trust in the 
+military that exceeded the mid-point. Only Belgium in 1997 and 1999 and Hungary
+in 2009 expressed a lower than 0 confidence in the military. On average, most
+publics expressed less trust in their countries' press than in their
+military. All the surveys where the public expressed greater trust in the press
+than the military occurred between 1997 and 2004 in Belgium, the Netherlands,
+Spain, and once in France. It is unclear why all these countries had relative
+changes in their approval of their militaries. All these countries entered the
+2001 war in Afghanistan and two of them - the Netherlands and Spain - became
+involved in the Iraq War. However, Spain held a contentious election in 2004
+which led to the removal of their troops from Iraq. The population in the 
+United Kingdom regularly expresses the lowest trust in the press, accounting for
+the 14 lowest values.
+
+<div class="centered">
+```{r confidence_xy, echo = FALSE, fig.width = 6}
+## Plots a graph of trust in the military compared to trust in the press
+
+cor_label <- paste("Correlation:", as.character(round(cor(euro_MIDs_4$conf_mil,
+                                              euro_MIDs_4$conf_press), 4)))
+
+gg_euro <- ggplot(data = euro_MIDs_4,
+                  aes(x = conf_mil, y = conf_press)) +
+  geom_jitter(aes(color = Year)) + xlab("Trust in Military (Aggregate)") +
+  ylab("Trust in Press (Aggregate)") +
+  xlim(c(-1, 1)) + ylim(c(-1, 1)) + 
+  scale_color_gradient2(name = "Year", limits = c(1996, 2010),
+                        low = muted("red"), mid = "grey", high = muted("blue"),
+                        midpoint = 2003) +
+  labs(title = "Plot 3: Trust in Military and Trust in Press",
+       subtitle = cor_label) +
+  theme(aspect.ratio = 1/1, plot.subtitle=element_text(size = 9))
+  
+gg_euro
+```
+</div>
+
+To test for the propositions of H1 and H2 that relative trust in the military is
+more important than the absolute numbers, I also add an interaction term to the
+models. The interaction between trust in the military and trust in the press
+provides further specification for the importance of the measures together. H1 
+and H2 are best supported if adding the interaction term improves model fit.
+
+The primary drawback of the Eurobarometer data is it's geographic isolation to 
+Europe. This creates the potential that results from this paper may only be 
+valid for European democracies, rather than globally. The World Values Survey, 
+which consists of cross-regional, cross-country surveys from 1981, was 
+considered as a primary data source for this study; however, the lack of a 
+consistent time-period for the surveys within countries and variations in which 
+countries were surveyed made this data less suitable for the methodology 
+employed in this study. The Eurobarometer dataset is unbalanced, in which there 
+are 13 years for most western European countries, six years for countries that
+began negotiations to join the EU as in the 2000s, and three years for 
+Macedonia. However, although the data is unbalanced, once countries are included 
+in the surveys, they continue to be included in all subsequent surveys.
+
+I have chosen to use the Eurobarometer data to try and measure ex ante opinions
+about the use of military force. However, even though the data is not collected 
+as an explicit response to the use of military force, many times the surveys 
+were collected while a country was anticipating or at war. For this reason, I 
+have added time variables of $t, t^2$, and $t^3$ since the last involvement as a
+participant in an MID. This method comes from @time_dependence, who advocate its
+use for modelling binary event history data as an alternative to the use of time
+dummy variables or less interpretable cubic splines. The variables are measured 
+as quarters since a country's involvement in an MID that at least escalated to 
+the Threat level, whether as an initiator or a target. The $t$ variables range 
+from 0, for countries that become involved in a new MID during the quarter in 
+which they were surveyed, to 259 for Finland in 2009, which had not been 
+involved in a militarized MID since World War Two. Newly-independent countries 
+from the former Czechoslovakia, the former Yugoslavia, and the Baltic countries 
+had MIDs included for when they were parts of their former countries. The median 
+number of quarters since a country was involved in a militarized MID is 21.
+
+I have omitted a variable that directly measures a country's ongoing involvement
+in a war or conflict situation because of these $t$ variables for MIDs. Ongoing
+conflicts between nations have led to ongoing threats and displays of force that
+should allow the MID variables to model a country in an ongoing conflict
+with another state. In addition, the measure of a country entering into a new
+MID, when the variables are set to 0, represents when a country has entered a 
+new conflict.
+
+Baum and Potter [-@baum_potter_2015] have demonstrated that a robust media 
+environment and larger number of opposition parties interact to decrease the 
+likelihood that a state will initiate a military action or join a coalition 
+military force. Their theory posits that a more diffuse opposition party
+structure is able to articulate multiple oppositional viewpoints on foreign
+policy, but that access to the press needs to be available for voters to hear
+these viewpoints and exercise democratic constraint. Consistent with Baum and
+Potter, I have included a measure of the effective number of parliamentary
+parties (ENPP) as a control variable [@electoral_systems]. @leblang_chan_2003
+have also found that  proportional-representation (PR) systems were
+significantly correlated with less war involvement. The authors suggest that PR
+systems either promote power-sharing configurations which inhibit the impulse to 
+participate in armed hostilities or are a reflection of norms and values that
+restrain conflict participation (397-8). Therefore, I have included a variable 
+that measures the system with which a country elects its parliament. The
+variable represents whether a country has a majoritarian, mixed, or proportional 
+representation system as a 0, 0.5, or 1, respectively [@electoral_systems].
+
+Rosato's argument that only a small subset of a population bears the costs of 
+war also needs to be addressed in my research design. I use the Military 
+Recruitment Data Set [@conscription] on military conscription to provide a 
+dummy control variable for countries that utilize a volunteer military (1) and
+those that have conscription (0). A country's use of conscription likely affects
+a citizen's perception of how likely they or their loved ones are to be
+personally affected by their country's participation in war. Without 
+conscription and the use of an all-volunteer force, a citizen may be less 
+opposed to war involvement since only citizens they do not know may be involved.
+
+### 5. Results
+
+Table 2 shows the results of estimating OLS models on the Eurobarometer data. 
+Models 1 and 2, the Threat models, test the independent and control variables
+against the number of MID threats initiated in the four quarters following the
+survey on trust in the military and the press. The even-numbered models add in
+the interaction term between trust in the military and trust in the press. 
+Models 1 and 2 do not support the hypotheses, as MID threats are not explained 
+by the inclusion of measures of trust in the military and the press, nor by the 
+inclusion of an interaction term between the two.
+
+Models 3 and 4, the Use models, provide limited support to the hypotheses. 
+Neither trust variable is significant in Model 3. However, the interaction term
+between trust in the military and trust in the press is significant with a 
+p-value of `r round(summary(euro_ols_use)$coef[10,4], 4)`. Adding the 
+interaction term also improves the overall model fit as measured by the 
+R-squared values. However, these two models have the lowest R-squared values of 
+the six models in the table, suggesting that the Use variable is the least
+explained.
+
+Models 5 and 6, the Constraint models, appear to strongly support H2. Higher 
+trust in the military and the press are not significant in Model 5. However, the
+addition of the interaction term improves the model fit as indicated by the 
+higher R-squared value. The p-value less than 0.01 for the interaction term
+strongly suggests the relationship between trust in the military and trust in
+the press is important for explaining democratic constraint.
+
+The interaction term between trust in the military and trust in the press is 
+paramount to explaining the dependent variables in these models. Since trust in 
+the military is above 0 for almost all the countries in my sample, an increase 
+in trust in the press increases the importance of the interaction term for 
+limiting a country's use of force (as in Model 4) or being constrained from MID 
+participation (as in Model 6).
+
+```{r stargazing_euro_OLS, results = 'asis'}
+## Generates Table 2 with the OLS coefficients. Will be saved to a separate 
+## html file when knitted to Word
+
+stargazer(euro_ols_threat_simple, euro_ols_threat,
+          euro_ols_use_simple, euro_ols_use,
+          euro_ols_constraint_simple, euro_ols_constraint,
+          title = "Table 2 - Eurobarometer OLS Results",
+          align = TRUE, type = "html",
+          style = "ajps",
+          dep.var.labels = c("Threats Initiated t",
+                             "Use of Force t",
+                             "Constrained t"),
+          covariate.labels = c("Trust in Military t-1",
+                               "Trust in Press t-1",
+                               "Volunteer Military (dummy) t-1",
+                               "ENPP t-1",
+                               "Proportional Representation (dummy) t-1",
+                               "Quarters since MID t-1",
+                               "Quarters since MID - squared t-1",
+                               "Quarters since MID - cubed t-1",
+                               "Trust in Military * Press t-1",
+                               "Constant"),
+          omit.stat = c("f", "ser"),
+          notes = "<em>&#42;p&lt;0.1;&#32;&#42;&#42;p&lt;0.05;&#32;&#42;&#42;&#42;p&lt;0.01</em> two-tailed test<br>Dependent Variables at time t; Independent variables at t-1",
+          notes.append = F, notes.align = "c", font.size = "large",
+          out = "table_2.html")
+```
+
+The OLS models are consistent with the expectations of H2, but less so with
+the predictions of H1. Higher trust in the military tends to be correlated with
+lower levels of initiating an MID threat or use of force. The coefficients in 
+Models 1 through 4 were inconsistent with H1 or not statistically significant.  
+Therefore, I also tested the same variables with a logit model to see if H1 is
+still unsupported and H2 is still supported. Given that most of the MID
+threat and MID use of force variables are imbalanced towards zero instances or 
+one instance of a country issuing a threat or using force, the dependent
+variables can be examined as a binomial factor.
+
+Table 3 consists of logit models using Eurobarometer data. Models 1 and 2, the 
+Threat models, measure a dichotomous variable of whether a country initiated an
+MID threat or higher in the four quarters following a survey. As in the OLS
+models, the even-numbered models add the interaction term between trust in the 
+military and trust in the press. The two logit Threat models provide some 
+support for H2, but not for H1 as an increase in trust in the military is not 
+significant for increasing the likelihood a country will issue an MID threat. 
+Adding the interaction term improves the model fit (as indicated by the higher 
+log-likelihood and lower AIC values).
+
+Models 3 and 4, the logit Use models, test whether a country is likely to
+initiate the use of force in the four quarters following the survey. Model 3
+actually counters H1, as higher trust in the military alone is significant for 
+reducing the liklihood that a country will initiate a use of force MID, though 
+only with a p-value of `r round(summary(euro_logit_use_simple)$coef[2,4], 4)`. 
+Model 4 further contravenes H1, as higher trust in the military is related to a 
+lower likelihood of using force as indicated by the negative coefficient for 
+trust in the military. H2 is supported by the models as the interaction term 
+between trust in the military and trust in the press is more important for 
+explaining the use of force than either variable alone. The addition of the 
+interaction term raised the log-likelihood and lowered the AIC, showing that the 
+interaction term also improved model fit. Finally, the Constraint logit models 
+represented by Models 5 and 6 support H2. Adding the interaction term improves
+both the log-likelihood and AIC measures. The interpretation of the interaction
+terms is explained in more detail later in this section.
+
+As with the OLS models, the addition of the interaction term in Models 2, 4, and
+6 improved the overall fit of each model and made the trust in the press variable
+statistically significant. However, as with the OLS variables, removing the
+interaction term and the trust in the military variable and only including trust
+in the press removes the statistical significance for trust in the press.
+
+```{r stargazing_euro_logit, results = 'asis'}
+## Generates the logit coefficient table. Will be saved to a separate html file
+## when knit to Word.
+
+stargazer(euro_logit_threat_simple, euro_logit_threat,
+          euro_logit_use_simple, euro_logit_use,
+          euro_logit_constraint_simple, euro_logit_constraint,
+          title = "Table 3 - Eurobarometer Logit Results",
+          align = TRUE, type = "html",
+          style = "ajps",
+          dep.var.labels = c("Threat Initiated t", "Use of Force Initiated t",
+                             "Constrained t"),
+          covariate.labels = c("Trust in Military t-1",
+                               "Trust in Press t-1",
+                               "Volunteer Military (dummy) t-1",
+                               "ENPP t-1",
+                               "Proportional Representation (dummy) t-1",
+                               "Quarters since MID t-1",
+                               "Quarters since MID - squared t-1",
+                               "Quarters since MID - cubed t-1",
+                               "Trust in Military * Press t-1",
+                               "Constant"),
+          notes = "<em>&#42;p&lt;0.1;&#32;&#42;&#42;p&lt;0.05;&#32;&#42;&#42;&#42;p&lt;0.01</em> two-tailed test<br>Dependent Variables at time t; Independent variables at t-1",
+          notes.append = F, notes.align = "c", font.size = "large",
+          out = "table_3.html")
+```
+
+Although the interactions were significant in the Threat, Use, and Constraint 
+logit models, without looking at their actual values, I could be making false 
+inferences about their applicability to H1 and H2. Therefore, the two plots
+below demonstrate the effect of the interaction between trust in 
+the military and trust in the press in logit models 2 (on the left) and 4 (on
+the right). The plots demonstrate the effect on the logit coefficient from the
+interaction between the level of trust in the military and trust in the press. 
+The histogram at the bottom of both plots shows the distribution of levels of
+trust in the press. The gray bars across the solid line show the 95% confidence
+interval in the effect of the interaction between trust in the press and trust 
+in the military for an average value of trust in the military,
+`r round(mean(euro_MIDs_4$conf_mil), 4)`.
+
+Plot 4 shows that at extremely low or extremely high levels of trust in the
+press, there is a significant (i.e. not 0) interaction effect with trust in the
+military on the coefficient for the Threat logit model. These results support 
+both hypotheses as lower trust in the press with average trust in the military
+greatly increases the coefficient for issuing an MID Threat. Likewise, higher
+trust in the press with average trust in the military decreases the likelihood
+of initiating an MID threat. However, the interaction effects are only 
+differentiated from zero at extremely low or high values of trust in the press, 
+so the overall support for the hypotheses is low.
+
+Plot 5 for the dependent variable of initiating the use of force only supports 
+H2, but does so more convincingly than Plot 4. An average level of trust in the 
+military coupled with a low level of trust in the press is indistinguishable 
+from the null effect of zero at the left end of the plot. However, only a 
+slightly net positive level of trust in the press interacts with an average 
+level of trust in the military to reduce the likelihood that a country will 
+initiate a use of force. The effect is distinguished from a null effect at 
+levels of trust in the press averaging over about 0.05.
+
+```{r interplot_threat, fig.align = "center"}
+## Interaction plot from Threat models
+p4 <- interplot(m = euro_logit_threat, var1 = "conf_mil", var2 = "conf_press",
+          hist = TRUE) +
+  xlab("Trust in Press") +
+  ylab("Estimated Coefficient of Trust in Military") +
+  ggtitle("Plot 4: Estimated Coefficient of\nTrust in Military") +
+  labs(subtitle = "Dependent Variable: Threat Initiated") +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 0, linetype = "dashed")
+```
+
+```{r interplot_use, fig.align = "center", fig.width = 7.5}
+## Interaction plot from Use model
+p5 <- interplot(m = euro_logit_use,
+          var1 = "conf_mil",
+          var2 = "conf_press", hist = TRUE) +
+  xlab("Trust in Press") +
+  ylab("Estimated Coefficient of Trust in Military") +
+  ggtitle("Plot 5: Estimated Coefficient of\nTrust in Military") +
+  labs(subtitle = "Dependent Variable: Use of Force Initiated") +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 0, linetype = "dashed")
+
+## Generates the grid with the Threat and Use model together
+gbm::grid.arrange(p4, p5, ncol = 2)
+```
+
+Finally, Plot 6 also uses the average level of trust in the military and shows 
+that the interaction is significant for both low and high levels of trust in the
+press. The left end of the plot shows that the coefficient for the Constraint
+model decreases for an average level of trust in the military when the level of 
+trust in the press is lower than about -0.28. On the other end of the plot, an 
+average level of trust in the military interacts with a level of trust in the 
+press of over about 0.1 to increase the likelihood of democratic constraint from 
+the use of force.
+
+```{r interplot_constraint, fig.align = "center", fig.width = 4}
+## Generates the interaction Constraint plot
+p6 <- interplot(m = euro_logit_constraint,
+          var1 = "conf_mil",
+          var2 = "conf_press", hist = TRUE) +
+  xlab("Trust in Press") +
+  ylab("Estimated Coefficient of Trust in Military") +
+  ggtitle("Plot 6: Estimated Coefficient of\nTrust in Military") +
+  labs(subtitle = "Dependent Variable: Constraint from MID") +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 0, linetype = "dashed")
+p6
+```
+
+These three interaction plots strongly support H2, that higher trust in the 
+military commensurate with relatively higher levels of trust in the press lowers
+the likelihood that a country will initiate either a threat or use of force MID. 
+Likewise, these countries will be further constrained from participating in 
+other military campaigns or responding militarily to another country's threat. 
+The plots provide less support for H1, as the left side of Plot 5 is 
+indistinguishable in the effect that an average level of trust in the 
+military has when coupled with a low level of trust in the press.
+
+All the OLS and logit models show the importance of modelling for the effects of
+recent MID participation and suggest autocorrelation across time for MID 
+participation. The $t^3$ variable was significant at the p < 0.01 level in ten
+of the twelve models. The $t$ and $t^2$ variables were also significant at 
+conventional levels in many of the OLS models. Removing the time effects did not 
+significantly alter the results of these models except for lowering the p-values
+for the non-time coefficients in the various models. However, failing to model 
+for time would have failed to account for the likely autocorrelation across time 
+for ongoing participation in MIDs or being democratically constrained that 
+exists for many countries. The high coefficients for at least one of the $t$ 
+variables in each model indicates that past, recent participation in an MID
+strongly explains subsequent participation in an MID. MIDs should be more likely 
+from countries that are engaged in protracted disputes with other countries and 
+the $t$ variables help to identify and control for these effects.
+
+```{r stargazing_fixed, results = 'asis'}
+## Generates Table 4 with the coefficients for the fixed-effects models
+
+stargazer(euro_fixed_time_threat, euro_fixed_time_use, euro_fixed_time_constraint,
+          title = "Table 4 - Eurobarometer Fixed-Effects Model Results",
+          align = TRUE, type = "html",
+          style = "ajps",
+          dep.var.labels = c("Threat Initiated t", "Use of Force Initiated t",
+                             "Constrained t"),
+          covariate.labels = c("Trust in Military t-1",
+                               "Trust in Press t-1",
+                               "Volunteer Military (dummy) t-1",
+                               "ENPP t-1",
+                               "Proportional Representation (dummy) t-1",
+                               "Quarters since MID t-1",
+                               "Quarters since MID - squared t-1",
+                               "Quarters since MID - cubed t-1",
+                               "Trust in Military * Press t-1",
+                               "Constant"),
+          notes = "<em>&#42;p&lt;0.1;&#32;&#42;&#42;p&lt;0.05;&#32;&#42;&#42;&#42;p&lt;0.01</em> two-tailed test<br>Dependent Variables at time t; Independent variables at t-1",
+          notes.append = F, notes.align = "c", font.size = "large",
+          out = "table_4.html")
+```
+
+Table 4 shows the results of applying fixed-effects models across country and 
+year to OLS models 2, 4, and 6 in Table 2. I conducted a Hausman test to 
+indicate the presence of fixed, rather than random effects. I also conducted a
+Breusch/Pagan test using the plmtest function in the plm R package to test for 
+the presence of time effects in the model. I also standardized the data to 
+include one observation per country per year from the first year that a country
+was included in the survey. In some instances, this required averaging the 
+values of two surveys for one year and for 1998, I imputed the values based upon
+the mean values between 1997 and 1999. 
+
+The results in Table 4 roughly match what is seen in Table 2. The interaction 
+term between the level of trust in the military and the level of trust in the 
+press is the most significant explanatory variable, outside of the $t$ since an 
+MID control variables. Generally, a higher level of trust in the military 
+correlates with less use of force in Model 2. The interaction term in all models 
+suggests that a higher trust in the military when coupled with higher trust in 
+the press correlates with less MID initiation and more democratic constraint.
+
+I applied a variety of other fixed effects model constructs. A fixed-effects
+model by year without the $t, t^2$, or $t^3$ variables also showed p-values of 
+greater significance for the interaction coefficients in the Threat, Use and
+Constraint models. The country fixed-effects models without time fixed effects
+generally failed to demonstrate any statistical significance for the trust in 
+institutions variables. The exception was the country fixed-effects model for 
+Constraint, in which the interaction was not significant, but trust in the 
+military alone correlated with a higher likelihood of constraint. The general
+take away from the fixed-effects models is the importance of modelling both 
+country fixed-effects and time fixed-effects to understand the importance of
+trust in institutions for affecting this study's dependent variables.
+
+For this study, I initially focused on the relationship between trust in the 
+military and trust in the press because of the lower levels of collinearity 
+between measures of trust in these two institutions. This lead to an inductive
+theory that focused on the relationship between trust in the military and trust
+in the press, rather than the relationship between trust in the military and 
+multiple domestic institutions. Measuring the interaction of the two 
+institutions that are least related suggests that citizens who trust or don't
+trust both have a higher level of trust or non-trust in their overall democratic
+institutions. In addition, these two variables tended to have the most complete 
+response history in the Eurobarometer surveys used for this study.  Nonetheless, 
+Appendix C presents a replication of Table 3 - Model 6 for five different 
+institutions and an amalgamated average of those institutions and the press. The 
+interaction between trust in the military is significant with
+trust in the parliament, national government, religious institutions, and the 
+aggregate trust of all institutions. However, there are systemic missing values
+for the last two, which were only included in later Eurobarometer surveys. The
+interaction between the military and parliament, and the military and national 
+government are significant and negative. However, because trust in these two 
+institutions is generally low, the effect on the constraint coefficient is 
+generally to increase the levels of constraint as Plots 3 and 4 in Appendix C
+show.
+
+### 6. Prediction with Random Forests
+
+Following the suggestion of @predictive_modeling, I now try and utilize a
+predictive modelling technique to see if the above models improve upon a naive,
+baseline classifier that only predicts the most common dependent variable as 
+occurring in all cases, regardless of the corresponding independent variables. 
+Cranmer and Desmaris outlined how predictive modelling of traditional variables
+associated with interstate war could reveal different dynamics than traditional
+explanatory models have emphasized. Their conclusions demonstrate that conflict
+is a "long-memory process" (163), which appears to be borne out by the 
+importance of the $t$ variables in the above models. Using a predictive model
+may also explain the importance of the variables included for analysis in 
+section 5. Although the interaction between the trust levels were significant in
+most of the models, this significance truly just allows me to reject a null 
+hypothesis that trust in the military and the press has no effect on foreign 
+policy behavior.
+
+I use the Random Forests method in this section because it is an ideal method 
+that controls against "garbage can models" [@seven_sins, 288] that can contain 
+too many insignificant control values without sufficient theoretical 
+justification. The Random Forests algorithm functions by generating a set
+number of decision trees. Each decision tree begins by splitting the dataset 
+based upon which independent variable best explains the outcome in the dependent
+variable. The tree continues to split the subsequent variables until it predicts
+an outcome. Random Forests operates by generating a large number of decision 
+trees based upon a random number of samples and variables in the overall dataset
+and then amalgamating these decision trees to predict the outcomes in the 
+overall dataset. In contrast to the OLS and logit methods above, the Random 
+Forests model is better suited for shedding potential covariates that lack 
+predictive capability for a model. Given the importance of the $t$ variables 
+above, if Random Forests only generates predictions based upon those variables,
+it will suggest that the trust variables and other controls do not add value to 
+predicting whether a country will initiate an MID or be democratically 
+constrained.
+
+Random Forests also has some precedent for being used to predict conflict onset,
+particularly in @random_forests, which used the model to predict the onset of 
+civil wars in Africa. Their dataset was similarly class-imbalanced like
+the MID dataset I have used for the above OLS and logit models. I also use
+Random Forests because of its balance between predictive capabilities and model 
+interpretability. The variable importance measures of the Random Forests
+model can be used to understand which variables are important to actually 
+predicting my dependent variables. Although other techniques could provide 
+greater predictive accuracy, the Random Forests technique provides the 
+interpretability needed to validate the applicability of the predictive
+model to this study.
+
+```{r caret, include = FALSE, echo = FALSE}
+## This chunk splits the data and creates three different splits for the various
+## models below
+
+set.seed(999) #I set the seed simply for consistency of results to write upon
+
+# Set DVs as factors, otherwise Random Forests cannot predict categorization
+euro_MIDs_4$orig_threat_fac <- factor(euro_MIDs_4$orig_threat_fac)
+euro_MIDs_4$orig_use_fac <- factor(euro_MIDs_4$orig_use_fac)
+euro_MIDs_4$Constraint <- factor(euro_MIDs_4$Constraint)
+
+in_train_threat <- createDataPartition(euro_MIDs_4$orig_threat_fac,
+                                       p = 3 / 4, list = FALSE)
+in_train_use <- createDataPartition(euro_MIDs_4$orig_use_fac,
+                                    p = 3 / 4, list = FALSE)
+in_train_constraint <- createDataPartition(euro_MIDs_4$Constraint,
+                                    p = 3 / 4, list = FALSE)
+
+training_threat <- euro_MIDs_4[in_train_threat, ]
+testing_threat <- euro_MIDs_4[-in_train_threat, ]
+
+training_use <- euro_MIDs_4[in_train_use, ]
+testing_use <- euro_MIDs_4[-in_train_use, ]
+
+training_constraint <- euro_MIDs_4[in_train_constraint, ]
+testing_constraint <- euro_MIDs_4[-in_train_constraint, ]
+
+# Sets the standard controls for the Random Forests models
+ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 5)
+trees <- 2 ^ 10
+rf_grid <- data.frame(.mtry = 2:5)
+```
+
+
+```{r rf_threat, include = FALSE, cache = TRUE}
+## The Random Forests Threat model is in this chunk
+set.seed(959)
+out <- train(orig_threat_fac ~ conf_mil * conf_press + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+             data = training_threat, method = "rf",
+             trControl = ctrl, tuneGrid = rf_grid, 
+             ntrees = trees, importance = TRUE)
+df <- varImp(out)
+y_hat <- predict(out, newdata = testing_threat)
+
+## This defaultSummary is helpful while writing, but does not print to report
+defaultSummary(data.frame(obs = testing_threat$orig_threat_fac, 
+                          pred = y_hat))
+conf <- confusionMatrix(y_hat,
+                        testing_threat$orig_threat_fac)
+```
+
+```{r rf_use, include = FALSE, cache = TRUE}
+## The Random Forests Use model is in this chunk
+set.seed(31655)
+out_use <- train(orig_use_fac ~ conf_mil * conf_press + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+             data = training_use, method = "rf",
+             trControl = ctrl, tuneGrid = rf_grid, 
+             ntrees = trees, importance = TRUE)
+df_use <- varImp(out_use)
+
+y_hat_use <- predict(out_use, newdata = testing_use)
+defaultSummary(data.frame(obs = testing_use$orig_use_fac, 
+                          pred = y_hat_use))
+conf_use <- confusionMatrix(y_hat_use,
+                            testing_use$orig_use_fac)
+```
+
+```{r rf_constraint, include = FALSE, cache = TRUE}
+## The Random Forests Constraint model is in this chunk
+set.seed(8000)
+out_constraint <- train(Constraint ~ conf_mil * conf_press + recruit + ENPP +
+                 Proportional_Rep + poly(Q_Since, 3),
+             data = training_constraint, method = "rf",
+             trControl = ctrl, tuneGrid = rf_grid, 
+             ntrees = trees, importance = TRUE)
+df_constraint <- varImp(out_constraint)
+
+y_hat_constraint <- predict(out_constraint, newdata = testing_constraint)
+defaultSummary(data.frame(obs = testing_constraint$Constraint, 
+                          pred = y_hat_constraint))
+conf_constraint <- confusionMatrix(y_hat_constraint,
+                      testing_constraint$Constraint)
+
+## Here are the models without the time variable that I allude to in the text
+## They are commented here to save processing time.
+#
+# set.seed(8000)
+# out_constraint_2 <- train(Constraint ~ conf_mil * conf_press,
+#              data = training_constraint, method = "rf",
+#              trControl = ctrl, tuneGrid = rf_grid, 
+#              ntrees = trees, importance = TRUE)
+# df_constraint_2 <- varImp(out_constraint_2)
+# 
+# y_hat_constraint_2 <- predict(out_constraint, newdata = testing_constraint)
+# defaultSummary(data.frame(obs = testing_constraint$Constraint,
+#                           pred = y_hat_constraint_2))
+# conf_constraint_2 <- confusionMatrix(y_hat_constraint_2,
+#                       testing_constraint$Constraint)
+```
+
+```{r accuracy_measures}
+## This chunk generates the combined prediction accuracy table for the three
+## Random Forests models
+
+# Function to calculate accuracy rate in text
+rf_accuracy <- function(incoming) {
+  round(incoming$overall[[1]], 4)
+}
+
+# Combines the confusion matricies into one variable to be used in a kable
+# or Flextable
+all_models <- cbind(conf$table, conf_use$table, conf_constraint$table)
+row.names(all_models) <- c("Predicted 0", "Predicted 1")
+all_models <- as_tibble(all_models, rownames = NA)
+
+if(doc.type == "docx"){
+  flextable(all_models, cwidth = 1.0) %>% 
+    add_header_lines(values = c("Table 5: Accuracy Rates of\nRandom Forests Models"))
+} else { 
+  kable(all_models, col.names = c(0, 1, 0, 1, 0, 1), row.names = T) %>% 
+    add_header_above(c("", "Threat \nReference" = 2, "Use \nReference" = 2,
+                       "Constraint \nReference" = 2)) %>% 
+    add_header_above(c("Table 5: Accuracy Rates of \nRandom Forests" = 7)) %>%
+    column_spec(1, bold = T, width = "6em") %>% 
+    column_spec(2:7, width = "3em") %>% 
+    kable_styling("striped", full_width = F)
+}
+  
+```
+
+I conduct the Random Forests predictions using `r trees` trees by using the 
+randomForest package in R. The dataset that was used for the OLS and logit
+models is split using the R caret package so that 75% is in a training dataset 
+and 25% is in a testing dataset. The training dataset is then used to train the 
+predictive model using 10-fold repeated cross-validation.
+
+The predictions are compared to the real values in the table displayed above. To
+compare the utility of the various models, we compare the ability of the models' 
+accuracy compared to simply predicting the most common value for all samples. 
+For predicting the initiation of an MID threat, our baseline prediction is
+`r round(nrow(dplyr::filter(euro_MIDs_4, orig_threat_fac == 0))/nrow(euro_MIDs_4), 4)`
+accuracy for the most common threat category. The Random Forests algorithm
+generates an accuracy of `r rf_accuracy(conf)`, which is lower than the baseline accuracy. For predicting the use of force, our baseline prediction accuracy is 
+`r round(nrow(dplyr::filter(euro_MIDs_4, orig_use_fac == 0))/nrow(euro_MIDs_4), 4)`,
+which is comparable but higher than the `r rf_accuracy(conf_use)` accuracy from 
+the Random Forests model. However, this model fails to predict the use of force 
+and actually predicts one false negative value. When predicting democratic
+constraint, the baseline prediction rate is 
+`r round(nrow(dplyr::filter(euro_MIDs_4, Constraint == 1))/nrow(euro_MIDs_4), 4)`
+, which is surpassed by the accuracy of
+`r rf_accuracy(conf_constraint)` for the Constraint model.
+
+Only the accuracy rate for the Constraint model demonstrates a significant
+improvement over the baseline predictor. The 6% improvement over the baseline 
+warrants a closer look. The table of variable importance measures listed below 
+provides the relative importance, scaled from 0 to 100, for generating these 
+models' predictions. Trust in the military is not a very important predictor for
+the Threat or Use models, although its interaction with trust in the press was 
+still important. However, since these models don't help with prediction, the 
+relative importance of the variables matters less. The generally poor results 
+from these two models do not support H1 and suggest that other factors than 
+those contained in the models above may affect a country's MID initiation.
+
+However, the Constraint model generates considerable support for H2. Trust in 
+the military, trust in the press, and the interaction are all important 
+variables, accounting for about 26.3, 11.5, and 12.3% of the models' 
+predictions, respectively. The improved results over the baseline predictor
+also suggest that the variables in this model help us understand what factors
+lead to democratic constraint. When removing the time variables, the Random
+Forests model still improves on the baseline prediction by about 5-6% and ENPP
+becomes the most important variable. When removing all variables but the trust 
+variables, the model still improves about 5-6% over the baseline. These results 
+suggest that each of these variables has some predictive capability for 
+democratic constraint, but that they explain similar concepts. [^1]
+
+```{r vim_overview}
+# Generate the variable importance measures in the three different Random 
+# Forests models and combine them into a single table for display
+
+vims <- df$importance[1]
+vims <- cbind(vims, df_use$importance[1])
+vims <- cbind(vims, df_constraint$importance[1])
+colnames(vims) <- c("Threat", "Use", "Constraint")
+rownames(vims) <- c("Trust in Military", "Trust in Press", "Volunteer Military",
+                    "ENPP", "Proportional Representation", "Quarters since MID",
+                    "Quarters since MID - squared", "Quarters since MID - cubed",
+                    "Trust in Military * Trust in Press")
+vims <- as.tibble(vims, rownames = "Variables") %>% arrange(desc(Constraint))
+
+if(doc.type == "docx") {
+  flextable(vims, cwidth = 1.0) %>% add_header_lines(values = c("Table 6: Variable Importance Measurement"))
+} else {
+kable(vims) %>% 
+  add_header_above(header = c("Table 6: Variable Importance Measure" = 4)) %>% 
+  column_spec(1, bold = T, width = "6em") %>% 
+  column_spec(2:4, width = "4em") %>% 
+  kable_styling("striped", full_width = F)
+}
+```
+
+The predictive models in this section undermine the limited support for H1, but 
+validate  support for the claims made about H2 in the previous section. The 
+trust measures are useful for predicting a country's democratic constraint, even
+if they are not helpful in the prediction of MID threat or use of force
+initiation.
+
+### 7. Limitations
+
+This study provides evidence that trust in institutions can affect the likelihood
+that a country will be constrained from the use of force. There is weaker, 
+suggestive evidence that countries will be more likely to initiate threats or 
+use force short of war, commensurate with public opinion about the military and
+the press. However, the data constraints of this study limit the extrapolation
+of these results to a conclusive theory about democratic constraint.
+
+The primary limitation of the study is its construction with public opinion data 
+only derived from European countries. The Eurobarometer data is of high quality
+and collected more frequently than many other cross-national public opinion 
+datasets. However, this data quality is also a symptom of the fact that the 
+Eurobarometer data is collected by European Union affiliated and funded
+institutions. Although the data includes some countries that are not in the
+European Union, it does only include members of the EU or those that have
+expressed some interest in joining the EU. One may expect these countries to
+remain on their best behavior while trying to join the multilateral
+organization. It also means that I have only studied relatively homogeneous
+democracies. However, this has provided a benefit in that many control
+variables, such as alliances, economic development, and others, have not been as 
+important as they would be in other cross-national, cross-regional studies.
+
+The isolation of these results to European countries provides openings for other
+researchers to use data from other regions to study the use of force. I explored
+the use of World Values Survey data, Latinobarometer, Africabarometer, and 
+Asiabarometer data as possible independent variable sources for this study. The
+use of the World Values Survey data largely confirmed the results of the models
+above, but unfortunately has a much lower-N and inconsistent frequency of data
+collection across many countries. The Latinobarometer data looks to be an 
+excellent future resource for replicating this study, but will likely need to be
+used with the next MID dataset update to encompass enough country-years. The 
+Africabarometer project, unfortunately, did not include as many democracies as 
+desired for this study design. The Asiabarometer dataset had inconsistent data 
+coverage for use in this study.
+
+Another limitation of this study is in considering how perceptions of "the 
+press" may have changed since the polls were done for this data. I initially
+compared trust in the military to trust in the press because of their low 
+collinearity and wider data availability. However, "the press" means different 
+things to all people. @baum_potter_2015 highlighted the press as a key measure 
+of encouraging democratic constraint in conjunction with a robust opposition 
+political structure. However, in a follow-up to that book, @baum_potter_2019 
+notes that the rise of the Internet as a source of news has helped push 
+democratic constraint "out of equilibrium." It is plausible that the rise of
+diffuse information sources through the Internet may just recalibrate how 
+publics engage regarding their "trust" in the press and other institutions. If 
+citizens see "the press" as a mainstream media structure that they no long 
+trust, the trust measures modeled in this paper may provide better leading
+indicators of democratic constraint, threats, or uses of force.
+
+A final limitation of this study was the inability to model partisan views about 
+institutions using the Eurobarometer data. For example, @burbach_2018 has
+identified that approval of the military is increasingly partisan in the United
+States. @snyder_et_al_2009 suggests that partisanship has made "discretionary
+preventive war a tempting wedge issue" in the United States (157). In a system
+that rewards fealty to only a portion of the electorate, leaders are likely to
+be less constrained from using force. @downs_1957 hypothesized that a polarized, 
+two-party system leads to "social chaos" as policy fluctuates from one extreme
+to another. This implies that a highly partisan structure may influence leaders
+to implement divergent policies from their predecessors, undermining the
+constraint mechanisms that had worked under previous leaders. Therefore, highly 
+divergent views on institutions in a country are a likely indicator of
+partisanship shaping views about specific institutions.
+
+I attempted to model the Eurobarometer data to include subsets of the data among
+extremely left or extremely right identifying members of countries. However, the
+results never changed significantly from the OLS and logit models presented
+earlier in this study. Including an interaction between the ENPP variable, trust
+in the military, and trust in the press, improved the fit of the OLS and the 
+logit models. This suggests that a better measure of partisanship may be useful
+for future analyses. However, although a high ENPP may temper a country 
+experiencing Downs's premise about two-party democracies, it doesn't truly 
+represent a lack of partisanship. It better represents a lack of partisans
+capable of steering their countries foreign policies with fewer limitations.
+
+### 8. Conclusions
+
+The evidence provided in this study is mixed as to whether or not mass public
+opinion about the military affects the likelihood that a democracy will initiate
+a militarized threat or use of force. However, the study supports the assertion
+that high trust in a democracy's military consistent with trust in the press
+correlates with a stronger democratic constraint mechanism against the use of
+force. 
+
+The predictive models that were outlined in the sixth section introduced some 
+skepticism about how conclusive and predictive the coefficients from the previous
+OLS and logit models are regarding the prediction of MID threat and use of 
+force initiation. This is not entirely unsurprising as the Threat and Use models
+had the lowest R-squared values of the OLS models and also had the most 
+class-imbalanced dependent variables. Although it wasn't included as a variable 
+itself, being a European democracy may have been the best predictor for threats 
+and uses of force given that all the data was drawn from this subset. This 
+highlights the ongoing importance of understanding bias in data collection for 
+truly predicting rare events.
+
+This study provides evidence through explanatory and predictive modelling that
+trust in the military is a valuable predictor for the likelihood of democratic 
+constraint in a democracy's foreign policy. The results are important not just 
+for improving the understanding of variations in domestic audience costs, but 
+also understanding civil-military engagement in democracies. @williams_2018 
+shows that defense spending preferences are consistent with social spending
+preferences in most countries. Likewise, this study shows that citizens of
+countries where the public trusts its military do not appear to enhance their 
+militarization, but simply strengthen their democratic engagement with another
+public institution. The implications for civil-military affairs are that seeing 
+the military as another, not as an exceptional, civic institution appears to
+affect the foreign policy behavior of a country.
+
+[^1]: The results presented here are consistent with the majority of splits into
+training and testing data. However, some splits in the data did yield lower than
+baseline results for the Constraint model. This paragraph considers not the best
+case model, but one that appeared most consistent with various iterations of 
+running the Random Forests algorithm on different splits in the data into 
+training and testing subsets.
+
+### Appendix A - Overview of Eurobarometer Surveys
+
+The survey data for this study was taken from the Eurobarometer study series.
+The data was retrieved from the University of Michigan's Inter-university
+Consortium for Political and Social Research (ICPSR). An overview of the 
+Eurobarometer series is available at 
+https://www.icpsr.umich.edu/icpsrweb/ICPSR/series/26
+
+The ICPSR site describes the Eurobarometer series as following: "The standard
+Eurobarometer surveys are designed to provide a regular monitoring of the social
+and political attitudes among the European publics, to obtain regular readings
+of support for European integration, public awareness of and attitudes toward
+European unification, the institutions of the European Communities, as of 1992
+the European Union, and its policies in complementary fashion. Attitudes towards
+the organization and role of the European Parliament and electoral behavior
+became a major topic in pre- and post- European Elections times, until in 2011
+the European Parliament took responsibility for an own survey module 
+("Parlemeter"). The standard program was complemented by measures of general 
+socio-political orientations, of subjective satisfaction and the perceived 
+quality of life, or of cultural, national and European identities."
+
+According to the ICPSR overview, the Eurobarometer "regularly includes all 
+member countries" of the EU in the surveys. Each survey is conducted via 
+face-to-face interviews in people's homes and in the appropriate national 
+language [@euro_64_2, 76]. "The basic sample design applied in all states is a 
+multi-stage, random (probability) one. In each country, a number of 
+points was drawn with probability proportional to population size (for a total
+coverage of the country) and to population density." [@euro_64_2, 76] Each sample
+includes approximately 1000 interviewees in each country.
+
+The early surveys of the 1970s included only the six original EU countries:
+Belgium, Germany, France, Italy, Luxembourg, and the Netherlands." The first
+survey included in this study is from 1997 in which the countries of Austria,
+Belgium, Denmark, Finland, France, Germany, Greece, Ireland, Italy, The
+Netherlands, Portugal, Spain, Sweden, and the United Kingdom were included. The 
+Eurobarometer surveys oversample by population size for Northern Ireland 
+(n = ~300), relative to the rest of the United Kingdom (n = ~1000). In addition, 
+the surveys oversample the former East Germany (n = ~1000), relative to the
+population of the former West Germany (n = ~1000). This gives a total n in the
+United Kingdom of about 1300 for each survey, and in Germany of about 2000.
+The values of these samples were rescaled in proportion to the current
+population distribution of Northern Ireland and the former East Germany relative
+to the United Kingdom and Germany, respectively.
+
+During the 2000s, the EU expanded into eastern Europe. As a result, the
+countries of Bulgaria, Croatia, the Czech Republic (now Czechia), Estonia,
+Hungary, Latvia, Lithuania, Poland, Romania, the Slovak Republic, Slovenia, and
+Turkey were included in the six surveys used for this study from 2004 to 2009.
+Macedonia is included in the three surveys used from 2007 to 2009.
+
+I omitted Iceland and Luxembourg from the survey data because of their small
+population sizes (although their inclusion strengthened the hypotheses). I also
+omitted Cyprus because of its small population and unique, split political 
+situation between the Turkish and Greek Cypriot communities and jurisdictions.
+
+### Appendix B - Models Without Time Variables
+
+The following tables present the same models as Tables 2, 3, and 4, except 
+without the $t, t^2$ and $t^3$ variables for time since a country was involved
+in an MID.
+
+```{r stargazing_euro_OLS_no_t, results = 'asis'}
+## Generates the coefficient table for the OLS models without the time control
+## variables
+
+stargazer(euro_ols_threat_simple_no_t, euro_ols_threat_no_t,
+          euro_ols_use_simple_no_t, euro_ols_use_no_t,
+          euro_ols_constraint_simple_no_t, euro_ols_constraint_no_t,
+          title = "Table 7 - Eurobarometer OLS Results (no t variables)",
+          align = TRUE, type = "html",
+          style = "ajps",
+          dep.var.labels = c("Threats Initiated at t",
+                             "Use of Force at t",
+                             "Constrained at t"),
+          covariate.labels = c("Trust in Military t-1",
+                               "Trust in Press t-1",
+                               "Volunteer Military (dummy) t-1",
+                               "ENPP t-1",
+                               "Proportional Representation (dummy) t-1",
+                               "Trust in Military * Press t-1",
+                               "Constant"),
+          omit.stat = c("f", "ser"),
+          notes = "<em>&#42;p&lt;0.1;&#32;&#42;&#42;p&lt;0.05;&#32;&#42;&#42;&#42;p&lt;0.01</em> two-tailed test",
+          notes.append = F, notes.align = "c", font.size = "large",
+          out = "table_7.html")
+```
+
+```{r stargazing_euro_logit_no_t, results = 'asis'}
+## Generates the coefficient table for the logit models in Table 8 without the 
+## time control variables
+
+stargazer(euro_logit_threat_simple_no_t, euro_logit_threat_no_t,
+          euro_logit_use_simple_no_t, euro_logit_use_no_t,
+          euro_logit_constraint_simple_no_t, euro_logit_constraint_no_t,
+          title = "Table 8 - Eurobarometer Logit Results (no t variables)",
+          align = TRUE, type = "html",
+          style = "ajps",
+          dep.var.labels = c("Threat Initiated at t",
+                             "Use of Force Initiated at t",
+                             "Constrained at t"),
+          covariate.labels = c("Trust in Military t-1",
+                               "Trust in Press t-1",
+                               "Volunteer Military (dummy) t-1",
+                               "ENPP t-1",
+                               "Proportional Representation (dummy) t-1",
+                               "Trust in Military * Press t-1",
+                               "Constant"),
+          notes = "<em>&#42;p&lt;0.1;&#32;&#42;&#42;p&lt;0.05;&#32;&#42;&#42;&#42;p&lt;0.01</em> two-tailed test",
+          notes.append = F, notes.align = "c", font.size = "large",
+          out = "table_8.html")
+```
+
+```{r stargazing_fixed_no_t, results = 'asis'}
+## Generates the coefficient table for the fixed-effects models without the 
+## time control variables
+
+stargazer(euro_fixed_time_threat_no_t, euro_fixed_time_use_no_t,
+          euro_fixed_time_constraint_no_t,
+          title = "Table 9 - Eurobarometer Fixed-Effects Model Results (no t variables)",
+          align = TRUE, type = "html",
+          style = "ajps",
+          dep.var.labels = c("Threat Initiated at t",
+                             "Use of Force Initiated at t",
+                             "Constrained at t"),
+          covariate.labels = c("Trust in Military t-1",
+                               "Trust in Press t-1",
+                               "Volunteer Military (dummy) t-1",
+                               "ENPP t-1",
+                               "Proportional Representation (dummy) t-1",
+                              "Trust in Military * Press t-1",
+                               "Constant"),
+          notes = "<em>&#42;p&lt;0.1;&#32;&#42;&#42;p&lt;0.05;&#32;&#42;&#42;&#42;p&lt;0.01</em> two-tailed test",
+          notes.append = F, notes.align = "c", font.size = "large",
+          out = "table_9.html")
+```
+
+### Appendix C - Other Institutions Effects on the Dependent Variables
+
+This section replicates Table 3 - Model 6 in the main study by replacing the
+variables for trust in the press with the trust measures in five other 
+institutions. Model 6 in this table, Table 7, averages the level of trust in all
+of these other institutions and includes that average as a single independent 
+variable. These models are meant to be suggestive as there were generally more
+missing values for these institutions.
+
+```{r stargazing_other_insts, results = 'asis'}
+## Generates the coefficient table for comparing trust in the military to five
+## other institutions.
+stargazer(euro_parl, euro_UN, euro_gov, euro_EU, euro_relig, euro_all,
+          title = "Table 10 - Eurobarometer Logit Results for Other Institutions",
+          align = TRUE, type = "html",
+          style = "ajps",
+          dep.var.labels = c("Constraint at t"),
+          covariate.labels = c("Trust in Military t-1",
+                               "Trust in Parlament t-1",
+                               "Trust in UN t-1", 
+                               "Trust in National Government t-1",
+                               "Trust in EU t-1", 
+                               "Trust in Religious Institutions t-1",
+                               "Aggregate trust in six institutions t-1",
+                               "Volunteer Military (dummy) t-1",
+                               "ENPP t-1",
+                               "Proportional Representation (dummy) t-1",
+                               "Quarters since MID t-1",
+                               "Quarters since MID - squared t-1",
+                               "Quarters since MID - cubed t-1",
+                               "Trust in Military * Parlament t-1",
+                               "Trust in Military * UN t-1",
+                               "Trust in Military * National Government t-1",
+                               "Trust in Military * EU t-1", 
+                               "Trust in Military * Relgious Institutions t-1",
+                               "Trust in Military * Aggregate trust t-1",
+                               "Constant"),
+          notes = "<em>&#42;p&lt;0.1;&#32;&#42;&#42;p&lt;0.05;&#32;&#42;&#42;&#42;p&lt;0.01</em> two-tailed test",
+          notes.append = F, notes.align = "c", font.size = "large",
+          out = "table_10.html")
+```
+
+```{r interplot_appendix, fig.align = "center", fig.width = 7.5}
+## Generates the interaction plot for the interaction between trust in the 
+## military and trust in parliament
+
+p7 <- interplot(m = euro_parl,
+          var1 = "conf_mil",
+          var2 = "conf_parl", hist = TRUE) +
+  xlab("Trust in Parlament") +
+  ylab("Estimated Coefficient of Trust in Military") +
+  ggtitle("Plot 7: Estimated Coefficient of\nTrust in Parlament") +
+  labs(subtitle = "Dependent Variable: Constraint from MID") +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 0, linetype = "dashed")
+
+## Generates the interaction plot for the interaction between trust in the 
+## military and trust in the national government
+
+p8 <- interplot(m = euro_gov,
+          var1 = "conf_mil",
+          var2 = "conf_gov", hist = TRUE) +
+  xlab("Trust in National Government") +
+  ylab("Estimated Coefficient of Trust in Military") +
+  ggtitle("Plot 8: Estimated Coefficient of\nTrust in National Government") +
+  labs(subtitle = "Dependent Variable: Constraint from MID") +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 0, linetype = "dashed")
+
+## Creates the grid with both of the interaction plots
+gbm::grid.arrange(p7, p8, ncol = 2)
+```
+
+### References
