@@ -45,6 +45,8 @@ library(interplot) # Generate the interaction plots
 library(corrgram)  # Generate the correlation matrix
 library(kableExtra)# Modifiers for the kables to pretty them up
 library(scales)    # Generates color scales for plots
+library(randomForest) #These bottom two are to run Random Forests
+library(e1071)
 
 doc.type <- knitr::opts_knit$get('rmarkdown.pandoc.to') # Get document type for
                              # differentiating html and docx formatting options
